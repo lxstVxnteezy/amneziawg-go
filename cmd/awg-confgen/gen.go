@@ -267,6 +267,8 @@ func (b *Bundle) ServerConfig() string {
 	fmt.Fprintf(&w, "Address = %s/%d\n", b.Address, b.Opts.Subnet.Bits())
 	fmt.Fprintf(&w, "ListenPort = %d\n", b.Opts.Port)
 	b.Obf.interfaceLines(&w)
+	// -I, not -A: with ufw/Docker the FORWARD policy is DROP and appended
+	// rules may never be reached.
 	// %i is expanded by awg-quick to the interface name
 	nat := func(op string) string {
 		return fmt.Sprintf("iptables %[1]s FORWARD -i %%i -j ACCEPT; "+
@@ -274,7 +276,7 @@ func (b *Bundle) ServerConfig() string {
 			"iptables -t nat %[1]s POSTROUTING -s %[2]s -o %[3]s -j MASQUERADE",
 			op, b.Opts.Subnet, b.Opts.WAN)
 	}
-	fmt.Fprintf(&w, "PostUp = sysctl -w net.ipv4.ip_forward=1; %s\n", nat("-A"))
+	fmt.Fprintf(&w, "PostUp = sysctl -w net.ipv4.ip_forward=1; %s\n", nat("-I"))
 	fmt.Fprintf(&w, "PostDown = %s\n", nat("-D"))
 	for _, c := range b.Clients {
 		fmt.Fprintf(&w, "\n# %s\n[Peer]\n", c.Name)
