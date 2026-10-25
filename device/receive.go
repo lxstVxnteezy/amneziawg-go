@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
+	"golang.org/x/crypto/chacha20"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -131,6 +132,8 @@ func (device *Device) RoutineReceiveIncoming(
 			return
 		}
 		deathSpiral = 0
+		// one clock read per batch is enough for the keypair expiry check
+		now := time.Now()
 
 		// handle each packet in the batch
 		for i, size := range sizes[:count] {
@@ -141,10 +144,16 @@ func (device *Device) RoutineReceiveIncoming(
 			// check size of packet
 			packet := bufsArrs[i][:size]
 
-			cip, err := device.HeaderProtectionCipher(packet[:HeaderCipherNonceSize])
-			if err != nil {
-				device.log.Errorf("Failed to initialize header cipher")
-				continue
+			// Built inline (not via HeaderProtectionCipher) so the cipher
+			// stays on the stack: this loop runs for every received packet.
+			var cip *chacha20.Cipher
+			if key := device.headerProtection.active.Load(); key != nil {
+				c, err := chacha20.NewUnauthenticatedCipher(key[:], packet[:HeaderCipherNonceSize])
+				if err != nil {
+					device.log.Errorf("Failed to initialize header cipher")
+					continue
+				}
+				cip = c
 			}
 
 			typeHash := typeHashBuf[:]
@@ -193,7 +202,7 @@ func (device *Device) RoutineReceiveIncoming(
 
 				// check keypair expiry
 
-				if keypair.created.Add(device.keychainExpireTime()).Before(time.Now()) {
+				if keypair.created.Add(device.keychainExpireTime()).Before(now) {
 					continue
 				}
 

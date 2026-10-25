@@ -358,8 +358,7 @@ func (device *Device) handleDeviceLine(ipcDev *ipcSetDevice, key, value string) 
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse jc: %w", err)
 		}
 
-		device.log.Verbosef("UAPI: Updating junk count")
-		device.junk.count.Store(uint32(jc))
+		ipcDev.junk.count = uint32(jc)
 
 	case "jmin":
 		jmin, err := strconv.ParseUint(value, 10, 32)
@@ -367,8 +366,7 @@ func (device *Device) handleDeviceLine(ipcDev *ipcSetDevice, key, value string) 
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse jmin: %w", err)
 		}
 
-		device.log.Verbosef("UAPI: Updating junk min")
-		device.junk.min.Store(uint32(jmin))
+		ipcDev.junk.min = uint32(jmin)
 
 	case "jmax":
 		jmax, err := strconv.ParseUint(value, 10, 32)
@@ -376,8 +374,7 @@ func (device *Device) handleDeviceLine(ipcDev *ipcSetDevice, key, value string) 
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse jmax: %w", err)
 		}
 
-		device.log.Verbosef("UAPI: Updating junk max")
-		device.junk.max.Store(uint32(jmax))
+		ipcDev.junk.max = uint32(jmax)
 
 	case "s1":
 		padding, err := strconv.ParseUint(value, 10, 16)
@@ -789,6 +786,11 @@ func (device *Device) IpcHandle(socket net.Conn) {
 }
 
 type ipcSetDevice struct {
+	junk struct {
+		count uint32
+		min   uint32
+		max   uint32
+	}
 	headers struct {
 		init      UintRange
 		response  UintRange
@@ -807,6 +809,10 @@ type ipcSetDevice struct {
 func (d *ipcSetDevice) fromDevice(device *Device) {
 	device.headerProtection.RLock()
 	defer device.headerProtection.RUnlock()
+
+	d.junk.count = device.junk.count.Load()
+	d.junk.min = device.junk.min.Load()
+	d.junk.max = device.junk.max.Load()
 
 	d.headers.init = device.headers.init.Load()
 	d.headers.response = device.headers.response.Load()
@@ -837,6 +843,31 @@ func (d *ipcSetDevice) mergeWithDevice(device *Device) error {
 		}
 	}
 
+	// Validate everything before storing anything, so a rejected config
+	// never leaves the device half-updated.
+	if !d.headerProtectionKey.IsZero() {
+		paddings := []uint32{d.paddings.init, d.paddings.response, d.paddings.cookie, d.paddings.transport}
+		for i, padding := range paddings {
+			if padding < HeaderCipherNonceSize {
+				return fmt.Errorf("S%d must be at least %d to use headerProtection", i+1, HeaderCipherNonceSize)
+			}
+		}
+	}
+
+	if d.junk.count > 0 {
+		if d.junk.min > d.junk.max {
+			return fmt.Errorf("jmin (%d) must not be greater than jmax (%d)", d.junk.min, d.junk.max)
+		}
+		if d.junk.max > MaxSegmentSize {
+			return fmt.Errorf("jmax (%d) must not exceed %d", d.junk.max, MaxSegmentSize)
+		}
+	}
+
+	device.log.Verbosef("UAPI: Updating junk count/min/max")
+	device.junk.count.Store(d.junk.count)
+	device.junk.min.Store(d.junk.min)
+	device.junk.max.Store(d.junk.max)
+
 	device.log.Verbosef("UAPI: Updating h1 padding")
 	device.headers.init.Store(d.headers.init)
 
@@ -848,15 +879,6 @@ func (d *ipcSetDevice) mergeWithDevice(device *Device) error {
 
 	device.log.Verbosef("UAPI: Updating h4 padding")
 	device.headers.transport.Store(d.headers.transport)
-
-	if !d.headerProtectionKey.IsZero() {
-		paddings := []uint32{d.paddings.init, d.paddings.response, d.paddings.cookie, d.paddings.transport}
-		for i, padding := range paddings {
-			if padding < HeaderCipherNonceSize {
-				return fmt.Errorf("S%d must be more then %d to use headerProtection", i, HeaderCipherNonceSize)
-			}
-		}
-	}
 
 	device.log.Verbosef("UAPI: Updating s1 padding")
 	device.paddings.init.Store(d.paddings.init)
@@ -872,6 +894,12 @@ func (d *ipcSetDevice) mergeWithDevice(device *Device) error {
 
 	device.log.Verbosef("UAPI: Updating header protection key")
 	device.headerProtection.key = d.headerProtectionKey
+	if d.headerProtectionKey.IsZero() {
+		device.headerProtection.active.Store(nil)
+	} else {
+		key := d.headerProtectionKey
+		device.headerProtection.active.Store(&key)
+	}
 
 	return nil
 }

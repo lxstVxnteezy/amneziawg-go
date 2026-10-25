@@ -634,6 +634,10 @@ func (device *Device) JunkPackets() [][]byte {
 
 	min := device.junk.min.Load()
 	max := device.junk.max.Load()
+	if max < min {
+		// IpcSet rejects this; guard anyway, max-min would wrap around
+		max = min
+	}
 
 	for range device.junk.count.Load() {
 		buf := make([]byte, min+fastrandn(max-min))
@@ -645,12 +649,12 @@ func (device *Device) JunkPackets() [][]byte {
 }
 
 func (device *Device) HeaderProtectionCipher(salt []byte) (*chacha20.Cipher, error) {
-	device.headerProtection.RLock()
-	defer device.headerProtection.RUnlock()
-
-	if device.headerProtection.key.IsZero() {
+	// Hot path: called for every packet, so avoid the RWMutex (shared cache
+	// line across all workers) and the constant-time IsZero scan.
+	key := device.headerProtection.active.Load()
+	if key == nil {
 		return nil, nil
 	}
 
-	return chacha20.NewUnauthenticatedCipher(device.headerProtection.key[:], salt)
+	return chacha20.NewUnauthenticatedCipher(key[:], salt)
 }

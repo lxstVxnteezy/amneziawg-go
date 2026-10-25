@@ -8,6 +8,7 @@ package device
 import (
 	"bytes"
 	"crypto/rand"
+	mrand "math/rand/v2"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
 	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
+	"golang.org/x/crypto/chacha20"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -333,6 +335,22 @@ func (device *Device) RoutineReadFromTUN() {
 
 		// read packets
 		count, readErr = device.tun.device.Read(bufs, sizes, offset)
+
+		// Read blocks, so S4 may have been reconfigured meanwhile (e.g. the
+		// first packet after IpcSet). Move packets to the current offset,
+		// otherwise they go out with stale padding and the peer drops them.
+		if current := device.paddings.transport.Load(); current != padding {
+			newOffset := MessageTransportHeaderSize + int(current)
+			for i := 0; i < count; i++ {
+				if newOffset+sizes[i] > len(bufs[i]) {
+					sizes[i] = 0
+					continue
+				}
+				copy(bufs[i][newOffset:], bufs[i][offset:offset+sizes[i]])
+			}
+			padding, offset = current, newOffset
+		}
+
 		for i := 0; i < count; i++ {
 			if sizes[i] < 1 {
 				continue
@@ -576,6 +594,12 @@ func (peer *Peer) randomTrailer(packetSize int) int {
 func (device *Device) RoutineEncryption(id int) {
 	var nonce [chacha20poly1305.NonceSize]byte
 
+	// Per-worker CSPRNG for the S4 prefix (also the header cipher nonce):
+	// avoids a crypto/rand syscall per packet and needs no locking.
+	var seed [32]byte
+	rand.Read(seed[:])
+	prng := mrand.NewChaCha8(seed)
+
 	defer device.log.Verbosef("Routine: encryption worker %d - stopped", id)
 	device.log.Verbosef("Routine: encryption worker %d - started", id)
 
@@ -588,7 +612,7 @@ func (device *Device) RoutineEncryption(id int) {
 
 			// fill crypto padding
 			crypt := elem.buffer[:elem.padding]
-			rand.Read(crypt)
+			prng.Read(crypt)
 
 			// populate header fields
 			header := elem.buffer[elem.padding : elem.padding+MessageTransportHeaderSize]
@@ -629,13 +653,15 @@ func (device *Device) RoutineEncryption(id int) {
 				nil,
 			)
 
-			cip, err := device.HeaderProtectionCipher(crypt[:HeaderCipherNonceSize])
-			if err != nil {
-				device.log.Errorf("Routing: header obfuscation failed - packet dropped")
-				elem.packet = nil
-				continue
-			}
-			if cip != nil {
+			// Build the cipher inline (not via HeaderProtectionCipher) so it
+			// stays on the stack instead of allocating per packet.
+			if key := device.headerProtection.active.Load(); key != nil {
+				cip, err := chacha20.NewUnauthenticatedCipher(key[:], crypt[:HeaderCipherNonceSize])
+				if err != nil {
+					device.log.Errorf("Routing: header obfuscation failed - packet dropped")
+					elem.packet = nil
+					continue
+				}
 				cip.XORKeyStream(header, header)
 			}
 		}

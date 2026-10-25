@@ -115,6 +115,8 @@ type Device struct {
 	headerProtection struct {
 		sync.RWMutex
 		key HeaderCipherKey
+		// active is a lock-free snapshot of key for the data path; nil when disabled
+		active atomic.Pointer[HeaderCipherKey]
 	}
 
 	contentPaddingAddition AtomicUintRange
