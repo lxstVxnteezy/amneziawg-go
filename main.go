@@ -64,7 +64,8 @@ func warning() {
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--version" {
-		fmt.Printf("amneziawg-go %s\n\nUserspace AmneziaWG daemon for %s-%s.\nInformation available at https://amnezia.org\n", Version, runtime.GOOS, runtime.GOARCH)
+		// "lxstVxnteezy fork" lets tools (awg-panel) tell this build from upstream
+		fmt.Printf("amneziawg-go %s (lxstVxnteezy fork)\n\nUserspace AmneziaWG daemon for %s-%s.\nInformation available at https://amnezia.org\nFork: https://github.com/lxstVxnteezy/amneziawg-go\n", Version, runtime.GOOS, runtime.GOARCH)
 		return
 	}
 
