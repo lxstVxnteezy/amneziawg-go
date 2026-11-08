@@ -251,9 +251,8 @@ func (device *Device) IpcSetOperation(r io.Reader) (err error) {
 		line := scanner.Text()
 		if line == "" {
 			// Blank line means terminate operation.
-			err := ipcDev.mergeWithDevice(device)
-			if err != nil {
-				return ipcErrorf(ipc.IpcErrorInvalid, "failed to merge with device: %w", err)
+			if err := ipcDev.mergeWithDevice(device); err != nil {
+				return err
 			}
 			peer.handlePostConfig()
 			return nil
@@ -269,7 +268,12 @@ func (device *Device) IpcSetOperation(r io.Reader) (err error) {
 
 		if key == "public_key" {
 			if deviceConfig {
+				// The device section is complete: validate and apply it
+				// before touching any peer.
 				deviceConfig = false
+				if err := ipcDev.mergeWithDevice(device); err != nil {
+					return err
+				}
 			}
 			peer.handlePostConfig()
 			// Load/create the peer we are now configuring.
@@ -290,9 +294,8 @@ func (device *Device) IpcSetOperation(r io.Reader) (err error) {
 			return err
 		}
 	}
-	err = ipcDev.mergeWithDevice(device)
-	if err != nil {
-		return ipcErrorf(ipc.IpcErrorInvalid, "failed to merge with device: %w", err)
+	if err := ipcDev.mergeWithDevice(device); err != nil {
+		return err
 	}
 	peer.handlePostConfig()
 
@@ -310,8 +313,11 @@ func (device *Device) handleDeviceLine(ipcDev *ipcSetDevice, key, value string) 
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to set private_key: %w", err)
 		}
-		device.log.Verbosef("UAPI: Updating private key")
-		device.SetPrivateKey(sk)
+		ipcDev.later(func() error {
+			device.log.Verbosef("UAPI: Updating private key")
+			device.SetPrivateKey(sk)
+			return nil
+		})
 
 	case "listen_port":
 		port, err := strconv.ParseUint(value, 10, 16)
@@ -319,16 +325,19 @@ func (device *Device) handleDeviceLine(ipcDev *ipcSetDevice, key, value string) 
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse listen_port: %w", err)
 		}
 
-		// update port and rebind
-		device.log.Verbosef("UAPI: Updating listen port")
+		ipcDev.later(func() error {
+			// update port and rebind
+			device.log.Verbosef("UAPI: Updating listen port")
 
-		device.net.Lock()
-		device.net.port = uint16(port)
-		device.net.Unlock()
+			device.net.Lock()
+			device.net.port = uint16(port)
+			device.net.Unlock()
 
-		if err := device.BindUpdate(); err != nil {
-			return ipcErrorf(ipc.IpcErrorPortInUse, "failed to set listen_port: %w", err)
-		}
+			if err := device.BindUpdate(); err != nil {
+				return ipcErrorf(ipc.IpcErrorPortInUse, "failed to set listen_port: %w", err)
+			}
+			return nil
+		})
 
 	case "fwmark":
 		mark, err := strconv.ParseUint(value, 10, 32)
@@ -336,10 +345,13 @@ func (device *Device) handleDeviceLine(ipcDev *ipcSetDevice, key, value string) 
 			return ipcErrorf(ipc.IpcErrorInvalid, "invalid fwmark: %w", err)
 		}
 
-		device.log.Verbosef("UAPI: Updating fwmark")
-		if err := device.BindSetMark(uint32(mark)); err != nil {
-			return ipcErrorf(ipc.IpcErrorPortInUse, "failed to update fwmark: %w", err)
-		}
+		ipcDev.later(func() error {
+			device.log.Verbosef("UAPI: Updating fwmark")
+			if err := device.BindSetMark(uint32(mark)); err != nil {
+				return ipcErrorf(ipc.IpcErrorPortInUse, "failed to update fwmark: %w", err)
+			}
+			return nil
+		})
 
 	case "replace_peers":
 		if value != "true" {
@@ -349,8 +361,11 @@ func (device *Device) handleDeviceLine(ipcDev *ipcSetDevice, key, value string) 
 				value,
 			)
 		}
-		device.log.Verbosef("UAPI: Removing all peers")
-		device.RemoveAllPeers()
+		ipcDev.later(func() error {
+			device.log.Verbosef("UAPI: Removing all peers")
+			device.RemoveAllPeers()
+			return nil
+		})
 
 	case "jc":
 		jc, err := strconv.ParseUint(value, 10, 32)
@@ -437,35 +452,50 @@ func (device *Device) handleDeviceLine(ipcDev *ipcSetDevice, key, value string) 
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse I1: %w", err)
 		}
-		device.ipackets[0] = chain
+		ipcDev.later(func() error {
+			device.ipackets[0] = chain
+			return nil
+		})
 
 	case "i2":
 		chain, err := newObfChain(value)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse I2: %w", err)
 		}
-		device.ipackets[1] = chain
+		ipcDev.later(func() error {
+			device.ipackets[1] = chain
+			return nil
+		})
 
 	case "i3":
 		chain, err := newObfChain(value)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse I3: %w", err)
 		}
-		device.ipackets[2] = chain
+		ipcDev.later(func() error {
+			device.ipackets[2] = chain
+			return nil
+		})
 
 	case "i4":
 		chain, err := newObfChain(value)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse I4: %w", err)
 		}
-		device.ipackets[3] = chain
+		ipcDev.later(func() error {
+			device.ipackets[3] = chain
+			return nil
+		})
 
 	case "i5":
 		chain, err := newObfChain(value)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse I5: %w", err)
 		}
-		device.ipackets[4] = chain
+		ipcDev.later(func() error {
+			device.ipackets[4] = chain
+			return nil
+		})
 
 	case "header_protection_key":
 		var key HeaderCipherKey
@@ -481,64 +511,88 @@ func (device *Device) handleDeviceLine(ipcDev *ipcSetDevice, key, value string) 
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse content_padding_addition: %w", err)
 		}
 
-		device.log.Verbosef("UAPI: Updating content padding addition")
-		device.contentPaddingAddition.Store(rang)
+		ipcDev.later(func() error {
+			device.log.Verbosef("UAPI: Updating content padding addition")
+			device.contentPaddingAddition.Store(rang)
+			return nil
+		})
 
 	case "rekey_after_time":
 		var rang UintRange
 		if err := rang.FromString(value); err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse rekey after time: %w", err)
 		}
-		device.log.Verbosef("UAPI: Updating rekey after time")
-		device.timings.rekeyAfterTimeSec.Store(rang)
+		ipcDev.later(func() error {
+			device.log.Verbosef("UAPI: Updating rekey after time")
+			device.timings.rekeyAfterTimeSec.Store(rang)
+			return nil
+		})
 
 	case "rekey_timeout":
 		var rang UintRange
 		if err := rang.FromString(value); err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse rekey timeout: %w", err)
 		}
-		device.log.Verbosef("UAPI: Updating rekey timeout")
-		device.timings.rekeyTimeoutSec.Store(rang)
+		ipcDev.later(func() error {
+			device.log.Verbosef("UAPI: Updating rekey timeout")
+			device.timings.rekeyTimeoutSec.Store(rang)
+			return nil
+		})
 
 	case "reject_after_time":
 		var rang UintRange
 		if err := rang.FromString(value); err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse reject after time: %w", err)
 		}
-		device.log.Verbosef("UAPI: Updating reject after time")
-		device.timings.rejectAfterTimeSec.Store(rang)
+		ipcDev.later(func() error {
+			device.log.Verbosef("UAPI: Updating reject after time")
+			device.timings.rejectAfterTimeSec.Store(rang)
+			return nil
+		})
 
 	case "keepalive_timeout":
 		var rang UintRange
 		if err := rang.FromString(value); err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse keepalive timeout: %w", err)
 		}
-		device.log.Verbosef("UAPI: Updating keepalive timeout")
-		device.timings.keepaliveTimeoutSec.Store(rang)
+		ipcDev.later(func() error {
+			device.log.Verbosef("UAPI: Updating keepalive timeout")
+			device.timings.keepaliveTimeoutSec.Store(rang)
+			return nil
+		})
 
 	case "max_handshake_attempts":
 		var rang UintRange
 		if err := rang.FromString(value); err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse max handshake attempts: %w", err)
 		}
-		device.log.Verbosef("UAPI: Updating max handshake attempts")
-		device.timings.maxHandshakeAttemps.Store(rang)
+		ipcDev.later(func() error {
+			device.log.Verbosef("UAPI: Updating max handshake attempts")
+			device.timings.maxHandshakeAttemps.Store(rang)
+			return nil
+		})
 
 	case "random_trailers":
 		val, err := strconv.ParseBool(value)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse random trailers: %w", err)
 		}
-		device.log.Verbosef("UAPI: Updating random trailers")
-		device.randomTrailers.Store(val)
+		ipcDev.later(func() error {
+			device.log.Verbosef("UAPI: Updating random trailers")
+			device.randomTrailers.Store(val)
+			return nil
+		})
 
 	case "disable_cookies":
 		val, err := strconv.ParseBool(value)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse disable cookies: %w", err)
 		}
-		device.log.Verbosef("UAPI: Updating disable cookies")
-		device.disableCookies.Store(val)
+		ipcDev.later(func() error {
+			device.log.Verbosef("UAPI: Updating disable cookies")
+			device.disableCookies.Store(val)
+			return nil
+		})
 
 	default:
 		return ipcErrorf(ipc.IpcErrorInvalid, "invalid UAPI device key: %v", key)
@@ -804,6 +858,16 @@ type ipcSetDevice struct {
 		transport uint32
 	}
 	headerProtectionKey HeaderCipherKey
+
+	// apply holds the side effects of the device section. They run only
+	// after the whole section has been validated, so a rejected config
+	// leaves the device untouched.
+	apply  []func() error
+	merged bool
+}
+
+func (d *ipcSetDevice) later(f func() error) {
+	d.apply = append(d.apply, f)
 }
 
 func (d *ipcSetDevice) fromDevice(device *Device) {
@@ -827,9 +891,13 @@ func (d *ipcSetDevice) fromDevice(device *Device) {
 	d.headerProtectionKey = device.headerProtection.key
 }
 
-func (d *ipcSetDevice) mergeWithDevice(device *Device) error {
-	device.headerProtection.Lock()
-	defer device.headerProtection.Unlock()
+// mergeWithDevice validates the staged device section and applies it. It must
+// run before any peer line is applied: peers are configured right after it.
+func (d *ipcSetDevice) mergeWithDevice(device *Device) *IPCError {
+	if d.merged {
+		return nil
+	}
+	d.merged = true
 
 	headers := []UintRange{d.headers.init, d.headers.response, d.headers.cookie, d.headers.transport}
 	for i := 0; i < len(headers); i++ {
@@ -838,7 +906,7 @@ func (d *ipcSetDevice) mergeWithDevice(device *Device) error {
 			right := headers[j]
 
 			if left.Overlap(right) {
-				return errors.New("headers must not overlap")
+				return ipcErrorf(ipc.IpcErrorInvalid, "headers must not overlap")
 			}
 		}
 	}
@@ -849,18 +917,37 @@ func (d *ipcSetDevice) mergeWithDevice(device *Device) error {
 		paddings := []uint32{d.paddings.init, d.paddings.response, d.paddings.cookie, d.paddings.transport}
 		for i, padding := range paddings {
 			if padding < HeaderCipherNonceSize {
-				return fmt.Errorf("S%d must be at least %d to use headerProtection", i+1, HeaderCipherNonceSize)
+				return ipcErrorf(ipc.IpcErrorInvalid, "S%d must be at least %d to use headerProtection", i+1, HeaderCipherNonceSize)
 			}
 		}
 	}
 
 	if d.junk.count > 0 {
 		if d.junk.min > d.junk.max {
-			return fmt.Errorf("jmin (%d) must not be greater than jmax (%d)", d.junk.min, d.junk.max)
+			return ipcErrorf(ipc.IpcErrorInvalid, "jmin (%d) must not be greater than jmax (%d)", d.junk.min, d.junk.max)
 		}
 		if d.junk.max > MaxSegmentSize {
-			return fmt.Errorf("jmax (%d) must not exceed %d", d.junk.max, MaxSegmentSize)
+			return ipcErrorf(ipc.IpcErrorInvalid, "jmax (%d) must not exceed %d", d.junk.max, MaxSegmentSize)
 		}
+	}
+
+	for _, f := range d.apply {
+		if err := f(); err != nil {
+			if ipcErr, ok := err.(*IPCError); ok {
+				return ipcErr
+			}
+			return ipcErrorf(ipc.IpcErrorInvalid, "%w", err)
+		}
+	}
+
+	device.headerProtection.Lock()
+	defer device.headerProtection.Unlock()
+
+	// Header protection is switched off before S1-S4 change and switched
+	// on after, so a worker that sees the key also sees paddings that can
+	// hold its nonce (see RoutineEncryption).
+	if d.headerProtectionKey.IsZero() {
+		device.headerProtection.active.Store(nil)
 	}
 
 	device.log.Verbosef("UAPI: Updating junk count/min/max")
@@ -894,9 +981,7 @@ func (d *ipcSetDevice) mergeWithDevice(device *Device) error {
 
 	device.log.Verbosef("UAPI: Updating header protection key")
 	device.headerProtection.key = d.headerProtectionKey
-	if d.headerProtectionKey.IsZero() {
-		device.headerProtection.active.Store(nil)
-	} else {
+	if !d.headerProtectionKey.IsZero() {
 		key := d.headerProtectionKey
 		device.headerProtection.active.Store(&key)
 	}

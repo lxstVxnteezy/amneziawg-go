@@ -8,9 +8,9 @@ package device
 import (
 	"bytes"
 	"crypto/rand"
-	mrand "math/rand/v2"
 	"encoding/binary"
 	"errors"
+	mrand "math/rand/v2"
 	"net"
 	"os"
 	"slices"
@@ -336,21 +336,6 @@ func (device *Device) RoutineReadFromTUN() {
 		// read packets
 		count, readErr = device.tun.device.Read(bufs, sizes, offset)
 
-		// Read blocks, so S4 may have been reconfigured meanwhile (e.g. the
-		// first packet after IpcSet). Move packets to the current offset,
-		// otherwise they go out with stale padding and the peer drops them.
-		if current := device.paddings.transport.Load(); current != padding {
-			newOffset := MessageTransportHeaderSize + int(current)
-			for i := 0; i < count; i++ {
-				if newOffset+sizes[i] > len(bufs[i]) {
-					sizes[i] = 0
-					continue
-				}
-				copy(bufs[i][newOffset:], bufs[i][offset:offset+sizes[i]])
-			}
-			padding, offset = current, newOffset
-		}
-
 		for i := 0; i < count; i++ {
 			if sizes[i] < 1 {
 				continue
@@ -605,6 +590,31 @@ func (device *Device) RoutineEncryption(id int) {
 
 	for elemsContainer := range device.queue.encryption.c {
 		for _, elem := range elemsContainer.elems {
+			// Load the key before S4: mergeWithDevice enables the key only
+			// after storing S1-S4, so a non-nil key here comes with paddings
+			// that can hold its nonce (checked below for the disable case).
+			key := device.headerProtection.active.Load()
+
+			// S4 may have been reconfigured after this packet was read from
+			// TUN (tun.Read blocks, and packets wait in the staged queue while
+			// a handshake runs). Move it to the current offset, otherwise it
+			// goes out with stale padding and the peer drops it.
+			if padding := device.paddings.transport.Load(); padding != elem.padding {
+				offset := int(padding) + MessageTransportHeaderSize
+				if offset+len(elem.packet) > len(elem.buffer) {
+					elem.packet = nil
+					continue
+				}
+				n := copy(elem.buffer[offset:], elem.packet)
+				elem.packet = elem.buffer[offset : offset+n]
+				elem.padding = padding
+			}
+			if key != nil && elem.padding < HeaderCipherNonceSize {
+				// header protection is being switched off together with S4
+				elem.packet = nil
+				continue
+			}
+
 			udpWindow := elem.padding + MinMessageSize + uint32(len(elem.packet))
 			if elem.peer.udpWindow.Load() < udpWindow {
 				elem.peer.udpWindow.Store(udpWindow)
@@ -655,7 +665,7 @@ func (device *Device) RoutineEncryption(id int) {
 
 			// Build the cipher inline (not via HeaderProtectionCipher) so it
 			// stays on the stack instead of allocating per packet.
-			if key := device.headerProtection.active.Load(); key != nil {
+			if key != nil {
 				cip, err := chacha20.NewUnauthenticatedCipher(key[:], crypt[:HeaderCipherNonceSize])
 				if err != nil {
 					device.log.Errorf("Routing: header obfuscation failed - packet dropped")
@@ -702,6 +712,10 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 		dataSent := false
 		elemsContainer.Lock()
 		for _, elem := range elemsContainer.elems {
+			if elem.packet == nil {
+				// dropped by the encryption worker
+				continue
+			}
 			if !elem.isKeepalive {
 				dataSent = true
 			}
@@ -709,12 +723,15 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 			bufs = append(bufs, elem.packet)
 		}
 
-		peer.timersAnyAuthenticatedPacketTraversal()
-		peer.timersAnyAuthenticatedPacketSent()
+		var err error
+		if len(bufs) > 0 {
+			peer.timersAnyAuthenticatedPacketTraversal()
+			peer.timersAnyAuthenticatedPacketSent()
 
-		err := peer.SendBuffers(bufs)
-		if dataSent {
-			peer.timersDataSent()
+			err = peer.SendBuffers(bufs)
+			if dataSent {
+				peer.timersDataSent()
+			}
 		}
 
 		for _, elem := range elemsContainer.elems {

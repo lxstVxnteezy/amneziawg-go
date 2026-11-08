@@ -9,10 +9,12 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hkdf"
+	"crypto/mlkem"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"slices"
 
 	"golang.org/x/crypto/curve25519"
 )
@@ -25,6 +27,9 @@ var quicV1InitialSalt = []byte{
 // minInitialDatagram is the minimum size of a datagram carrying a client
 // Initial (RFC 9000, Section 14.1).
 const minInitialDatagram = 1200
+
+// initialDatagram is the size Chrome pads its Initial datagrams to.
+const initialDatagram = 1250
 
 type initialKeys struct {
 	key, iv, hp []byte
@@ -143,7 +148,22 @@ func transportParam(id, value uint64) []byte {
 	return append(b, v...)
 }
 
-// clientHello returns a TLS 1.3 ClientHello handshake message for QUIC.
+// grease returns a random GREASE value (RFC 8701) not in used.
+func grease(used map[uint16]bool) uint16 {
+	for {
+		n := uint16(randInt(0, 15))
+		v := n<<12 | 0x0a00 | n<<4 | 0x0a
+		if !used[v] {
+			used[v] = true
+			return v
+		}
+	}
+}
+
+// clientHello returns a TLS 1.3 ClientHello handshake message for QUIC,
+// shaped like the one current Chrome sends over HTTP/3: GREASE, hybrid
+// post-quantum key share (X25519MLKEM768), certificate compression,
+// ALPS and a shuffled extension order.
 func clientHello(sni string, scid []byte) ([]byte, error) {
 	var random [32]byte
 	if _, err := rand.Read(random[:]); err != nil {
@@ -157,26 +177,43 @@ func clientHello(sni string, scid []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	dk, err := mlkem.GenerateKey768()
+	if err != nil {
+		return nil, err
+	}
 
-	var exts []byte
-	{
+	used := map[uint16]bool{}
+	greaseCipher := grease(used)
+	greaseGroup := grease(used)
+	greaseVersion := grease(used)
+	greaseExtFirst := grease(used)
+	greaseExtLast := grease(used)
+	greaseTP := uint64(31*randInt(1, 1000) + 27) // reserved transport parameter id
+
+	u16 := func(v ...uint16) []byte {
+		var b []byte
+		for _, x := range v {
+			b = binary.BigEndian.AppendUint16(b, x)
+		}
+		return b
+	}
+
+	sniExt := func() []byte {
 		name := []byte{0} // host_name
 		name = appendU16Prefixed(name, []byte(sni))
-		exts = append(exts, extension(0x0000, appendU16Prefixed(nil, name))...)
-	}
-	exts = append(exts, extension(0x000a, appendU16Prefixed(nil, []byte{0x00, 0x1d, 0x00, 0x17, 0x00, 0x18}))...)
-	exts = append(exts, extension(0x000d, appendU16Prefixed(nil, []byte{
-		0x04, 0x03, 0x08, 0x04, 0x04, 0x01, 0x05, 0x03, 0x08, 0x05, 0x05, 0x01, 0x08, 0x06, 0x06, 0x01,
-	}))...)
-	exts = append(exts, extension(0x0010, appendU16Prefixed(nil, []byte{2, 'h', '3'}))...)
-	exts = append(exts, extension(0x002b, []byte{2, 0x03, 0x04})...)
-	exts = append(exts, extension(0x002d, []byte{1, 1})...)
-	{
-		share := binary.BigEndian.AppendUint16(nil, 0x001d)
-		share = appendU16Prefixed(share, pub)
-		exts = append(exts, extension(0x0033, appendU16Prefixed(nil, share))...)
-	}
-	{
+		return extension(0x0000, appendU16Prefixed(nil, name))
+	}()
+	keyShareExt := func() []byte {
+		var shares []byte
+		shares = append(shares, u16(greaseGroup)...)
+		shares = appendU16Prefixed(shares, []byte{0})
+		shares = append(shares, u16(0x11ec)...) // X25519MLKEM768
+		shares = appendU16Prefixed(shares, append(dk.EncapsulationKey().Bytes(), pub...))
+		shares = append(shares, u16(0x001d)...)
+		shares = appendU16Prefixed(shares, pub)
+		return extension(0x0033, appendU16Prefixed(nil, shares))
+	}()
+	tpExt := func() []byte {
 		var tp []byte
 		tp = append(tp, transportParam(0x01, 30000)...)    // max_idle_timeout
 		tp = append(tp, transportParam(0x03, 1472)...)     // max_udp_payload_size
@@ -186,39 +223,72 @@ func clientHello(sni string, scid []byte) ([]byte, error) {
 		tp = append(tp, transportParam(0x07, 6291456)...)  // initial_max_stream_data_uni
 		tp = append(tp, transportParam(0x08, 100)...)      // initial_max_streams_bidi
 		tp = append(tp, transportParam(0x09, 103)...)      // initial_max_streams_uni
-		tp = appendVarint(tp, 0x0f)                        // initial_source_connection_id
+		tp = append(tp, transportParam(0x20, 65536)...)    // max_datagram_frame_size
+		tp = append(tp, transportParam(greaseTP, uint64(randInt(0, 1<<20)))...)
+		tp = appendVarint(tp, 0x0f) // initial_source_connection_id
 		tp = appendVarint(tp, uint64(len(scid)))
 		tp = append(tp, scid...)
-		exts = append(exts, extension(0x0039, tp)...)
+		return extension(0x0039, tp)
+	}()
+
+	middle := [][]byte{
+		sniExt,
+		extension(0x000a, appendU16Prefixed(nil, u16(greaseGroup, 0x11ec, 0x001d, 0x0017, 0x0018))),
+		extension(0x000d, appendU16Prefixed(nil, u16(0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601))),
+		extension(0x0010, appendU16Prefixed(nil, []byte{2, 'h', '3'})),
+		extension(0x002b, append([]byte{4}, u16(greaseVersion, 0x0304)...)),
+		extension(0x002d, []byte{1, 1}),
+		keyShareExt,
+		extension(0x001b, []byte{2, 0x00, 0x02}), // compress_certificate: brotli
+		extension(0x44cd, appendU16Prefixed(nil, []byte{2, 'h', '3'})), // application_settings
+		tpExt,
 	}
+	// Chrome shuffles its extensions. Keep SNI ahead of the large key
+	// share, so it lands in the first Initial packet where SNI-based DPI
+	// looks for it.
+	for i := len(middle) - 1; i > 0; i-- {
+		j := randInt(0, i)
+		middle[i], middle[j] = middle[j], middle[i]
+	}
+	si := slices.IndexFunc(middle, func(e []byte) bool { return &e[0] == &sniExt[0] })
+	ki := slices.IndexFunc(middle, func(e []byte) bool { return &e[0] == &keyShareExt[0] })
+	if si > ki {
+		middle[si], middle[ki] = middle[ki], middle[si]
+	}
+
+	exts := extension(greaseExtFirst, nil)
+	for _, e := range middle {
+		exts = append(exts, e...)
+	}
+	exts = append(exts, extension(greaseExtLast, []byte{0})...)
 
 	body := []byte{0x03, 0x03} // legacy_version
 	body = append(body, random[:]...)
-	body = append(body, 0)                                              // empty legacy_session_id (QUIC)
-	body = append(body, 0x00, 0x06, 0x13, 0x01, 0x13, 0x02, 0x13, 0x03) // cipher suites
-	body = append(body, 0x01, 0x00)                                     // null compression
+	body = append(body, 0) // empty legacy_session_id (QUIC)
+	body = appendU16Prefixed(body, u16(greaseCipher, 0x1301, 0x1302, 0x1303))
+	body = append(body, 0x01, 0x00) // null compression
 	body = appendU16Prefixed(body, exts)
 
 	msg := []byte{0x01, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}
 	return append(msg, body...), nil
 }
 
-// cryptoFramePadded wraps data in a CRYPTO frame at offset 0 and pads it with
-// PADDING frames so the whole datagram reaches minInitialDatagram bytes.
-func cryptoFramePadded(data []byte, headerLen int) []byte {
-	f := []byte{0x06, 0x00}
-	f = appendVarint(f, uint64(len(data)))
-	f = append(f, data...)
-	if want := minInitialDatagram - headerLen - 16; len(f) < want {
-		f = append(f, make([]byte, want-len(f))...)
-	}
-	return f
+// cryptoFrame wraps data in a CRYPTO frame at the given offset. Offset and
+// length are always written as 2-byte varints.
+func cryptoFrame(offset int, data []byte) []byte {
+	f := []byte{0x06}
+	f = binary.BigEndian.AppendUint16(f, uint16(offset)|0x4000)
+	f = binary.BigEndian.AppendUint16(f, uint16(len(data))|0x4000)
+	return append(f, data...)
 }
 
-// quicInitials returns `count` client Initial datagrams for the same
-// connection attempt: the first one and its retransmissions, as a browser
-// sends them when the server does not answer.
-func quicInitials(sni string, count int) ([][]byte, error) {
+const cryptoFrameOverhead = 1 + 2 + 2
+
+// quicInitials returns the client Initial datagrams of one connection
+// attempt. The ClientHello with a post-quantum key share does not fit in one
+// datagram, so like Chrome it is split across consecutive Initial packets,
+// each padded to initialDatagram bytes.
+func quicInitials(sni string) ([][]byte, error) {
 	dcid := make([]byte, 8)
 	if _, err := rand.Read(dcid); err != nil {
 		return nil, err
@@ -229,15 +299,21 @@ func quicInitials(sni string, count int) ([][]byte, error) {
 	}
 	// header: 1 + 4 + 1+8 + 1+0 + 1 (token len) + 2 (length) + 4 (pn)
 	headerLen := 1 + 4 + 1 + len(dcid) + 1 + 1 + 2 + 4
-	frames := cryptoFramePadded(hello, headerLen)
+	room := initialDatagram - headerLen - 16 - cryptoFrameOverhead
 
-	out := make([][]byte, 0, count)
-	for pn := range count {
-		p, err := sealInitial(dcid, nil, uint32(pn), frames)
+	var out [][]byte
+	for offset := 0; offset < len(hello); offset += room {
+		chunk := hello[offset:min(offset+room, len(hello))]
+		frames := cryptoFrame(offset, chunk)
+		frames = append(frames, make([]byte, initialDatagram-headerLen-16-len(frames))...) // PADDING
+		p, err := sealInitial(dcid, nil, uint32(len(out)), frames)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, p)
+	}
+	if len(out) > 5 {
+		return nil, errors.New("ClientHello needs more than the 5 available I-packets")
 	}
 	return out, nil
 }

@@ -22,8 +22,13 @@ type Options struct {
 	Subnet   netip.Prefix // server gets .1, clients .2, .3, ...
 	DNS      string
 	MTU      int
-	SNI      string // domain put into the QUIC ClientHello of I1/I2
-	WAN      string // server uplink interface for NAT
+	SNI      string // domain put into the QUIC ClientHello of the I-packets
+	WAN      string // server uplink interface for NAT; "" detects it at PostUp time
+
+	// DisableCookies turns off the cookie (load) mechanism. It removes one
+	// more recognizable message type, but leaves the server without
+	// handshake flood protection.
+	DisableCookies bool
 }
 
 type keyPair struct {
@@ -34,7 +39,6 @@ type Obfuscation struct {
 	Jc, Jmin, Jmax         int
 	S1, S2, S3, S4         int
 	H1, H2, H3, H4         string
-	I1, I2                 string
 	HeaderProtectionKey    string
 	ContentPaddingAddition string
 }
@@ -44,6 +48,10 @@ type Client struct {
 	Keys    keyPair
 	PSK     string
 	Address netip.Addr
+	// IPackets are I1..In: this client's own QUIC Initial datagrams. They
+	// are fixed bytes resent before every handshake, so at least they must
+	// not be shared: a common DCID would link all clients of the server.
+	IPackets []string
 }
 
 type Bundle struct {
@@ -165,7 +173,7 @@ func headerRanges() [4]string {
 	return out
 }
 
-func newObfuscation(sni string) (Obfuscation, error) {
+func newObfuscation() Obfuscation {
 	var o Obfuscation
 
 	o.Jc = randInt(3, 6)
@@ -187,16 +195,21 @@ func newObfuscation(sni string) (Obfuscation, error) {
 	h := headerRanges()
 	o.H1, o.H2, o.H3, o.H4 = h[0], h[1], h[2], h[3]
 
-	initials, err := quicInitials(sni, 2)
-	if err != nil {
-		return o, err
-	}
-	o.I1 = "<b 0x" + hex.EncodeToString(initials[0]) + ">"
-	o.I2 = "<b 0x" + hex.EncodeToString(initials[1]) + ">"
-
 	o.HeaderProtectionKey = base64.StdEncoding.EncodeToString(randBytes(32))
 	o.ContentPaddingAddition = fmt.Sprintf("%d-%d", randInt(4, 12), randInt(40, 64))
-	return o, nil
+	return o
+}
+
+func iPackets(sni string) ([]string, error) {
+	initials, err := quicInitials(sni)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, len(initials))
+	for i, p := range initials {
+		out[i] = "<b 0x" + hex.EncodeToString(p) + ">"
+	}
+	return out, nil
 }
 
 func Generate(opts Options) (*Bundle, error) {
@@ -223,41 +236,56 @@ func Generate(opts Options) (*Bundle, error) {
 	}
 	opts.SNI = sni
 
-	obf, err := newObfuscation(opts.SNI)
-	if err != nil {
-		return nil, err
+	if opts.MTU < 1280 || opts.MTU > 1420 {
+		return nil, fmt.Errorf("MTU %d is out of range 1280-1420", opts.MTU)
 	}
+	if opts.WAN != "" && strings.ContainsAny(opts.WAN, " \t;&|$`'\"\\()<>") {
+		return nil, fmt.Errorf("bad WAN interface name %q", opts.WAN)
+	}
+
 	b := &Bundle{
 		Opts:    opts,
 		Server:  newKeyPair(),
 		Address: opts.Subnet.Addr().Next(),
-		Obf:     obf,
+		Obf:     newObfuscation(),
 	}
 	addr := b.Address
 	for i := range opts.Clients {
 		addr = addr.Next()
+		ipk, err := iPackets(opts.SNI)
+		if err != nil {
+			return nil, err
+		}
 		b.Clients = append(b.Clients, Client{
-			Name:    fmt.Sprintf("client%d", i+1),
-			Keys:    newKeyPair(),
-			PSK:     base64.StdEncoding.EncodeToString(randBytes(32)), // one per client
-			Address: addr,
+			Name:     fmt.Sprintf("client%d", i+1),
+			Keys:     newKeyPair(),
+			PSK:      base64.StdEncoding.EncodeToString(randBytes(32)), // one per client
+			Address:  addr,
+			IPackets: ipk,
 		})
 	}
 	return b, nil
 }
 
 // interfaceLines renders the obfuscation lines shared by server and clients.
-// Both sides carry I1/I2: whoever starts a handshake sends them.
-func (o Obfuscation) interfaceLines(w *strings.Builder) {
+// Only clients carry I-packets: they are client Initials, and a server
+// sending them from port 443 would not look like QUIC. The receiving side
+// ignores I-packets, so the server does not need them to accept a client.
+func (o Obfuscation) interfaceLines(w *strings.Builder, ipackets []string, disableCookies bool) {
 	fmt.Fprintf(w, "Jc = %d\nJmin = %d\nJmax = %d\n", o.Jc, o.Jmin, o.Jmax)
 	fmt.Fprintf(w, "S1 = %d\nS2 = %d\nS3 = %d\nS4 = %d\n", o.S1, o.S2, o.S3, o.S4)
 	fmt.Fprintf(w, "H1 = %s\nH2 = %s\nH3 = %s\nH4 = %s\n", o.H1, o.H2, o.H3, o.H4)
-	fmt.Fprintf(w, "I1 = %s\nI2 = %s\n", o.I1, o.I2)
+	for i, p := range ipackets {
+		fmt.Fprintf(w, "I%d = %s\n", i+1, p)
+	}
 	fmt.Fprintf(w, "HeaderProtectionKey = %s\n", o.HeaderProtectionKey)
 	fmt.Fprintf(w, "ContentPaddingAddition = %s\n", o.ContentPaddingAddition)
 	fmt.Fprintf(w, "RekeyAfterTime = %s\nRekeyTimeout = %s\nRejectAfterTime = %s\n", rekeyAfterTime, rekeyTimeout, rejectAfterTime)
 	fmt.Fprintf(w, "KeepaliveTimeout = %s\nMaxHandshakeAttempts = %s\n", keepaliveTimeout, maxHandshakeAttempts)
-	w.WriteString("RandomTrailers = on\nDisableCookies = on\n")
+	w.WriteString("RandomTrailers = on\n")
+	if disableCookies {
+		w.WriteString("DisableCookies = on\n")
+	}
 }
 
 func (b *Bundle) ServerConfig() string {
@@ -266,15 +294,24 @@ func (b *Bundle) ServerConfig() string {
 	fmt.Fprintf(&w, "PrivateKey = %s\n", b.Server.Private)
 	fmt.Fprintf(&w, "Address = %s/%d\n", b.Address, b.Opts.Subnet.Bits())
 	fmt.Fprintf(&w, "ListenPort = %d\n", b.Opts.Port)
-	b.Obf.interfaceLines(&w)
+	// Same MTU as the clients: with awg-quick's default (1420) the server
+	// would tunnel packets that, with S4, padding and trailers, no longer
+	// fit a 1500-byte link and get fragmented.
+	fmt.Fprintf(&w, "MTU = %d\n", b.Opts.MTU)
+	b.Obf.interfaceLines(&w, nil, b.Opts.DisableCookies)
+	wan := b.Opts.WAN
+	if wan == "" {
+		// awg-quick runs PostUp/PostDown through bash
+		wan = "$(ip -4 route show default | awk '{print $5; exit}')"
+	}
 	// -I, not -A: with ufw/Docker the FORWARD policy is DROP and appended
 	// rules may never be reached.
 	// %i is expanded by awg-quick to the interface name
 	nat := func(op string) string {
 		return fmt.Sprintf("iptables %[1]s FORWARD -i %%i -j ACCEPT; "+
-			"iptables %[1]s FORWARD -o %%i -m state --state RELATED,ESTABLISHED -j ACCEPT; "+
+			"iptables %[1]s FORWARD -o %%i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; "+
 			"iptables -t nat %[1]s POSTROUTING -s %[2]s -o %[3]s -j MASQUERADE",
-			op, b.Opts.Subnet, b.Opts.WAN)
+			op, b.Opts.Subnet, wan)
 	}
 	fmt.Fprintf(&w, "PostUp = sysctl -w net.ipv4.ip_forward=1; %s\n", nat("-I"))
 	fmt.Fprintf(&w, "PostDown = %s\n", nat("-D"))
@@ -296,10 +333,12 @@ func (b *Bundle) ClientConfig(c Client) string {
 		fmt.Fprintf(&w, "DNS = %s\n", b.Opts.DNS)
 	}
 	fmt.Fprintf(&w, "MTU = %d\n", b.Opts.MTU)
-	b.Obf.interfaceLines(&w)
+	b.Obf.interfaceLines(&w, c.IPackets, b.Opts.DisableCookies)
 	w.WriteString("\n[Peer]\n")
 	fmt.Fprintf(&w, "PublicKey = %s\n", b.Server.Public)
 	fmt.Fprintf(&w, "PresharedKey = %s\n", c.PSK)
+	// ::/0 without IPv6 on the server is deliberate: IPv6 is blackholed
+	// instead of leaking past the tunnel.
 	w.WriteString("AllowedIPs = 0.0.0.0/0, ::/0\n")
 	fmt.Fprintf(&w, "Endpoint = %s\n", hostPort(b.Opts.Endpoint, b.Opts.Port))
 	fmt.Fprintf(&w, "PersistentKeepalive = %s\n", persistentKeepalive)

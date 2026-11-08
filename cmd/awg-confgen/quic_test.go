@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -137,12 +138,43 @@ func sniFromClientHello(t *testing.T, m []byte) (sni, alpn string) {
 	return
 }
 
-func TestQuicInitialsLookLikeHTTP3(t *testing.T) {
-	pkts, err := quicInitials("vk.com", 2)
-	if err != nil {
-		t.Fatal(err)
+// readVarint decodes a QUIC variable-length integer.
+func readVarint(b []byte) (uint64, int) {
+	n := 1 << (b[0] >> 6)
+	v := uint64(b[0] & 0x3f)
+	for _, c := range b[1:n] {
+		v = v<<8 | uint64(c)
 	}
-	var firstDCID []byte
+	return v, n
+}
+
+// cryptoData returns the CRYPTO frames of a decrypted Initial payload as
+// offset -> data, and fails on anything but CRYPTO and PADDING.
+func cryptoData(t *testing.T, frames []byte) map[int][]byte {
+	t.Helper()
+	out := map[int][]byte{}
+	for len(frames) > 0 {
+		switch frames[0] {
+		case 0x00:
+			frames = frames[1:]
+		case 0x06:
+			off, n1 := readVarint(frames[1:])
+			l, n2 := readVarint(frames[1+n1:])
+			start := 1 + n1 + n2
+			out[int(off)] = frames[start : start+int(l)]
+			frames = frames[start+int(l):]
+		default:
+			t.Fatalf("unexpected frame type %#x", frames[0])
+		}
+	}
+	return out
+}
+
+// clientHelloFromInitials reassembles the CRYPTO stream of a connection
+// attempt and checks the packets are consistent.
+func clientHelloFromInitials(t *testing.T, pkts [][]byte) []byte {
+	t.Helper()
+	var firstDCID, stream []byte
 	for i, p := range pkts {
 		if len(p) < minInitialDatagram {
 			t.Fatalf("datagram %d is %d bytes, QUIC requires >= %d", i, len(p), minInitialDatagram)
@@ -154,20 +186,75 @@ func TestQuicInitialsLookLikeHTTP3(t *testing.T) {
 		if firstDCID == nil {
 			firstDCID = dcid
 		} else if !bytes.Equal(dcid, firstDCID) {
-			t.Error("retransmission uses a different DCID")
+			t.Error("Initials of one connection use different DCIDs")
 		}
-		if frames[0] != 0x06 || frames[1] != 0x00 {
-			t.Fatalf("expected CRYPTO frame at offset 0, got %x", frames[:2])
-		}
-		l := int(binary.BigEndian.Uint16(frames[2:]) & 0x3fff)
-		sni, alpn := sniFromClientHello(t, frames[4:4+l])
-		if sni != "vk.com" || alpn != "h3" {
-			t.Errorf("sni=%q alpn=%q", sni, alpn)
-		}
-		for _, b := range frames[4+l:] {
-			if b != 0 {
-				t.Fatal("non-PADDING bytes after CRYPTO frame")
+		for off, data := range cryptoData(t, frames) {
+			if off != len(stream) {
+				t.Fatalf("CRYPTO offset %d, expected %d", off, len(stream))
 			}
+			stream = append(stream, data...)
 		}
 	}
+	if len(stream) < 4 || int(stream[1])<<16|int(stream[2])<<8|int(stream[3]) != len(stream)-4 {
+		t.Fatal("ClientHello is incomplete")
+	}
+	return stream
+}
+
+func TestQuicInitialsLookLikeHTTP3(t *testing.T) {
+	pkts, err := quicInitials("vk.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkts) != 2 {
+		t.Fatalf("%d Initials, a post-quantum ClientHello takes 2", len(pkts))
+	}
+	hello := clientHelloFromInitials(t, pkts)
+	sni, alpn := sniFromClientHello(t, hello)
+	if sni != "vk.com" || alpn != "h3" {
+		t.Errorf("sni=%q alpn=%q", sni, alpn)
+	}
+
+	// SNI must be readable from the first datagram alone
+	_, _, frames := openInitial(t, pkts[0])
+	if !bytes.Contains(cryptoData(t, frames)[0], []byte("vk.com")) {
+		t.Error("SNI is not in the first Initial")
+	}
+
+	exts := extensionTypes(t, hello)
+	for _, want := range []uint16{0x0033, 0x0039, 0x001b, 0x44cd} {
+		if !slices.Contains(exts, want) {
+			t.Errorf("extension %#04x missing", want)
+		}
+	}
+	if !isGrease(exts[0]) || !isGrease(exts[len(exts)-1]) {
+		t.Error("ClientHello is not wrapped in GREASE extensions like Chrome's")
+	}
+}
+
+func TestClientHelloIsRandomized(t *testing.T) {
+	a, _ := clientHello("vk.com", nil)
+	b, _ := clientHello("vk.com", nil)
+	if bytes.Equal(a, b) {
+		t.Fatal("two ClientHellos are identical")
+	}
+}
+
+func isGrease(v uint16) bool { return v&0x0f0f == 0x0a0a && v>>12 == (v>>4)&0x0f }
+
+// extensionTypes lists the extension types of a ClientHello in order.
+func extensionTypes(t *testing.T, m []byte) []uint16 {
+	t.Helper()
+	b := m[4:]
+	b = b[2+32:]
+	b = b[1+int(b[0]):]
+	b = b[2+int(binary.BigEndian.Uint16(b)):]
+	b = b[1+int(b[0]):]
+	exts := b[2 : 2+int(binary.BigEndian.Uint16(b))]
+	var out []uint16
+	for len(exts) > 0 {
+		out = append(out, binary.BigEndian.Uint16(exts))
+		exts = exts[4+int(binary.BigEndian.Uint16(exts[2:])):]
+	}
+	return out
 }

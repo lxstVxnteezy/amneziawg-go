@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"net/netip"
@@ -180,28 +179,30 @@ func TestGeneratedConfigsWorkInCore(t *testing.T) {
 			transit(t, cliTun, srvTun, c.Address, b.Address)
 			transit(t, srvTun, cliTun, b.Address, c.Address)
 
-			// What went on the wire before the first handshake: I1, I2, junk.
+			// What went on the wire before the first handshake: I-packets, junk.
 			rec.mu.Lock()
 			sent := rec.sent
 			rec.mu.Unlock()
-			i1 := mustHex(t, strings.TrimSuffix(strings.TrimPrefix(b.Obf.I1, "<b 0x"), ">"))
-			i2 := mustHex(t, strings.TrimSuffix(strings.TrimPrefix(b.Obf.I2, "<b 0x"), ">"))
-			if len(sent) < 2+b.Obf.Jc+1 {
+			ni := len(c.IPackets)
+			if len(sent) < ni+b.Obf.Jc+1 {
 				t.Fatalf("only %d datagrams sent", len(sent))
 			}
-			if !bytes.Equal(sent[0], i1) || !bytes.Equal(sent[1], i2) {
-				t.Fatal("handshake was not preceded by the QUIC I-packets")
+			for i, ip := range c.IPackets {
+				want := mustHex(t, strings.TrimSuffix(strings.TrimPrefix(ip, "<b 0x"), ">"))
+				if !bytes.Equal(sent[i], want) {
+					t.Fatalf("datagram %d is not I%d", i, i+1)
+				}
 			}
-			for _, j := range sent[2 : 2+b.Obf.Jc] {
+			for _, j := range sent[ni : ni+b.Obf.Jc] {
 				if len(j) < b.Obf.Jmin || len(j) >= b.Obf.Jmax {
 					t.Fatalf("junk packet of %d bytes outside [%d,%d)", len(j), b.Obf.Jmin, b.Obf.Jmax)
 				}
 			}
-			if init := sent[2+b.Obf.Jc]; len(init) < 148+b.Obf.S1 {
+			if init := sent[ni+b.Obf.Jc]; len(init) < 148+b.Obf.S1 {
 				t.Fatalf("handshake initiation is %d bytes, expected >= %d", len(init), 148+b.Obf.S1)
 			}
 			// the plain WireGuard type (1, 0, 0, 0) must not be visible
-			for _, p := range sent[2:] {
+			for _, p := range sent[ni:] {
 				if bytes.HasPrefix(p, []byte{1, 0, 0, 0}) || bytes.HasPrefix(p, []byte{4, 0, 0, 0}) {
 					t.Fatal("vanilla WireGuard header on the wire")
 				}
@@ -219,7 +220,7 @@ func TestGenerateUniquePerClientSecrets(t *testing.T) {
 	seen := map[string]bool{}
 	ips := map[netip.Addr]bool{b.Address: true}
 	for _, c := range b.Clients {
-		for _, s := range []string{c.PSK, c.Keys.Private} {
+		for _, s := range append([]string{c.PSK, c.Keys.Private}, c.IPackets...) {
 			if seen[s] {
 				t.Fatal("secret reused between clients")
 			}
@@ -231,7 +232,7 @@ func TestGenerateUniquePerClientSecrets(t *testing.T) {
 		ips[c.Address] = true
 	}
 	// 10.0.0.0/26 fits the server and 61 clients, not 62
-	if _, err := Generate(Options{Endpoint: "1.2.3.4", Clients: 62,
+	if _, err := Generate(Options{Endpoint: "1.2.3.4", Clients: 62, MTU: 1280,
 		Subnet: netip.MustParsePrefix("10.0.0.0/26")}); err == nil {
 		t.Fatal("subnet overflow not detected")
 	}
@@ -265,11 +266,44 @@ func TestSNIFromURLReachesI1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	i1 := mustHex(t, strings.TrimSuffix(strings.TrimPrefix(b.Obf.I1, "<b 0x"), ">"))
-	_, _, frames := openInitial(t, i1)
-	l := int(binary.BigEndian.Uint16(frames[2:]) & 0x3fff)
-	if sni, _ := sniFromClientHello(t, frames[4:4+l]); sni != "yandex.ru" {
-		t.Fatalf("I1 carries SNI %q", sni)
+	var pkts [][]byte
+	for _, ip := range b.Clients[0].IPackets {
+		pkts = append(pkts, mustHex(t, strings.TrimSuffix(strings.TrimPrefix(ip, "<b 0x"), ">")))
+	}
+	if sni, _ := sniFromClientHello(t, clientHelloFromInitials(t, pkts)); sni != "yandex.ru" {
+		t.Fatalf("I-packets carry SNI %q", sni)
+	}
+}
+
+func TestServerConfig(t *testing.T) {
+	b, err := Generate(Options{Endpoint: "1.2.3.4", Port: 443, Clients: 1,
+		Subnet: netip.MustParsePrefix("10.66.66.0/24"), MTU: 1280})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := b.ServerConfig()
+	for _, want := range []string{"MTU = 1280\n", "--ctstate RELATED,ESTABLISHED", "ip -4 route show default"} {
+		if !strings.Contains(srv, want) {
+			t.Errorf("server config lacks %q", want)
+		}
+	}
+	for _, bad := range []string{"\nI1 =", "DisableCookies", "-m state"} {
+		if strings.Contains(srv, bad) {
+			t.Errorf("server config contains %q", bad)
+		}
+	}
+	if !strings.Contains(b.ClientConfig(b.Clients[0]), "\nI2 = ") {
+		t.Error("client config lacks I2")
+	}
+
+	b.Opts.DisableCookies = true
+	if !strings.Contains(b.ServerConfig(), "DisableCookies = on") {
+		t.Error("-disable-cookies is ignored")
+	}
+
+	if _, err := Generate(Options{Endpoint: "1.2.3.4", Clients: 1, MTU: 1280,
+		Subnet: netip.MustParsePrefix("10.66.66.0/24"), WAN: "eth0; rm -rf /"}); err == nil {
+		t.Error("shell metacharacters in -wan accepted")
 	}
 }
 

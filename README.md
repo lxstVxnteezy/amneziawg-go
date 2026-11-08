@@ -51,6 +51,36 @@ $ cd amneziawg-go
 $ make
 ```
 
+## Config generator (awg-confgen)
+
+`cmd/awg-confgen` generates a matching server config and client configs with every obfuscation feature enabled.
+
+```
+$ go run ./cmd/awg-confgen -endpoint vpn.example.com -clients 3
+```
+
+It writes `awg-configs/server/awg0.conf` and `awg-configs/clients/clientN.conf`. Options:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `-endpoint` | — | public IP or hostname of the server (required) |
+| `-port` | `443` | server UDP port |
+| `-clients` | `1` | number of client configs |
+| `-subnet` | `10.66.66.0/24` | tunnel subnet, the server takes the first address |
+| `-mtu` | `1280` | tunnel MTU for the server and clients (1280-1420) |
+| `-sni` | random popular site | domain put into the QUIC ClientHello of the I-packets |
+| `-wan` | from the default route | server uplink interface used for NAT |
+| `-disable-cookies` | off | turn off the cookie mechanism; this also removes handshake flood protection |
+| `-dns` | `1.1.1.1, 1.0.0.1` | DNS servers for clients |
+
+Each client gets its own I-packets: a real QUIC v1 Initial carrying a Chrome-like TLS ClientHello (GREASE, X25519MLKEM768, shuffled extensions), split across I1 and I2 the way Chrome splits it. The server config has no I-packets, because they are client Initials and the receiving side ignores them anyway.
+
+Known limitations:
+
+- I-packets are fixed bytes, so the same client sends the same Initial before every handshake (every few minutes). They cannot be randomized per handshake without re-encrypting the Initial. A DPI that remembers Initials can notice the repeats.
+- After the Initial, the traffic on the same flow does not look like QUIC: with header protection the first byte is random, so about half the packets break the QUIC short-header fixed bit.
+- Clients route `::/0` into the tunnel but the server has no IPv6. IPv6 is blackholed on purpose so it does not leak past the tunnel.
+
 ## Configuration
 
 ### Data types and definitions
