@@ -317,3 +317,32 @@ func TestDefaultSNIIsFromList(t *testing.T) {
 		t.Fatalf("default SNI %q is not from defaultSNIs", b.Opts.SNI)
 	}
 }
+
+func TestDefaultSNIFollowsEndpoint(t *testing.T) {
+	b, err := Generate(Options{Endpoint: "VPN.Example.com", Port: 443, Clients: 1,
+		Subnet: netip.MustParsePrefix("10.66.66.0/24"), MTU: 1280})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Opts.SNI != "vpn.example.com" || len(b.Warnings) != 0 {
+		t.Fatalf("SNI %q, warnings %q", b.Opts.SNI, b.Warnings)
+	}
+
+	b, err = Generate(Options{Endpoint: "203.0.113.5", Port: 443, Clients: 1,
+		Subnet: netip.MustParsePrefix("10.66.66.0/24"), MTU: 1280})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b.Warnings) == 0 {
+		t.Fatal("no warning for an SNI that does not match an IP endpoint")
+	}
+
+	b, err = Generate(Options{Endpoint: "203.0.113.5", Port: 443, Clients: 1, SNI: "my.domain.ru",
+		Subnet: netip.MustParsePrefix("10.66.66.0/24"), MTU: 1280})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Opts.SNI != "my.domain.ru" || len(b.Warnings) != 0 {
+		t.Fatalf("explicit -sni: SNI %q, warnings %q", b.Opts.SNI, b.Warnings)
+	}
+}

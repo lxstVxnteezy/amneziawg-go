@@ -68,12 +68,14 @@ It writes `awg-configs/server/awg0.conf` and `awg-configs/clients/clientN.conf`.
 | `-clients` | `1` | number of client configs |
 | `-subnet` | `10.66.66.0/24` | tunnel subnet, the server takes the first address |
 | `-mtu` | `1280` | tunnel MTU for the server and clients (1280-1420) |
-| `-sni` | random popular site | domain put into the QUIC ClientHello of the I-packets |
+| `-sni` | `-endpoint` if it is a domain, else a popular site | domain put into the QUIC ClientHello of the I-packets |
 | `-wan` | from the default route | server uplink interface used for NAT |
 | `-disable-cookies` | off | turn off the cookie mechanism; this also removes handshake flood protection |
 | `-dns` | `1.1.1.1, 1.0.0.1` | DNS servers for clients |
 
 Each client gets its own I-packets: a real QUIC v1 Initial carrying a Chrome-like TLS ClientHello (GREASE, X25519MLKEM768, shuffled extensions), split across I1 and I2 the way Chrome splits it. The server config has no I-packets, because they are client Initials and the receiving side ignores them anyway.
+
+Pick the SNI so that it resolves to the server: a DPI can compare the SNI of a QUIC Initial with the destination IP, and `www.google.com` on a VPS address is easy to flag. Point a domain of yours at the server and pass it as `-endpoint` (it becomes the SNI) or as `-sni`. With an IP endpoint the generator falls back to a popular site and prints a warning.
 
 Known limitations:
 
@@ -135,6 +137,28 @@ This param could be used to customize default Wireguard's timings
 [Peer]
 M PersistentKeepalive  = "uint32,range - client-side - seconds" # interval of persistent keepalive
 ```
+
+### Port rotation [client-side, this fork]
+
+The client can periodically move to a new random local UDP port. Every period then looks like a new short flow that starts with the I-packets and junk, instead of one long-lived high-volume flow to the same address, which is what per-flow throttling and statistics key on. Right after the switch a handshake is sent from the new port, so the server follows immediately. The server needs no support for it: to the server this is ordinary WireGuard roaming.
+
+```
+[Device]
++ port_rotation = "uint32,range - client-side - seconds" # interval between port changes, at least 10; 0 disables
+```
+
+amneziawg-tools does not know this key, so `awg setconf`/`awg-quick` reject it in a config file. When the client runs this amneziawg-go through awg-quick, set it with an environment variable instead:
+
+```
+$ sudo AWG_PORT_ROTATION=120-300 WG_QUICK_USERSPACE_IMPLEMENTATION=amneziawg-go awg-quick up client1
+```
+
+On Linux awg-quick prefers the amneziawg kernel module when it is loaded, and then this setting has no effect: rotation needs the userspace amneziawg-go. On macOS awg-quick always uses userspace. Applications that embed the module can set `port_rotation` over UAPI.
+
+Notes:
+- Rotation is skipped when `ListenPort` is set explicitly, so a server never moves.
+- Packets the server sends in the short gap before it learns the new port are lost. TCP resends them.
+- Every rotation is a new handshake that resends the same I-packets, so very short intervals make the repeats more visible. A few minutes is a reasonable interval.
 
 ### Junk packets
 

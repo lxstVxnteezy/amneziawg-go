@@ -43,6 +43,7 @@ type Device struct {
 		bind          conn.Bind // bind interface
 		netlinkCancel *rwcancel.RWCancel
 		port          uint16 // listening port
+		portExplicit  bool   // listen_port was set to a non-zero value: never rotate it
 		fwmark        uint32 // mark value (0 = disabled)
 		brokenRoaming bool
 	}
@@ -131,6 +132,11 @@ type Device struct {
 
 	randomTrailers atomic.Bool
 	disableCookies atomic.Bool
+
+	// portRotation is the interval in seconds between local port changes
+	// (see RoutinePortRotation); zero disables it.
+	portRotation     AtomicUintRange
+	portRotationKick chan struct{}
 }
 
 // deviceState represents the state of a Device.
@@ -330,6 +336,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	device := new(Device)
 	device.state.state.Store(uint32(deviceStateDown))
 	device.closed = make(chan struct{})
+	device.portRotationKick = make(chan struct{}, 1)
 	device.log = logger
 	device.net.bind = bind
 	device.tun.device = tunDevice
@@ -375,6 +382,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	device.queue.encryption.wg.Add(1) // RoutineReadFromTUN
 	go device.RoutineReadFromTUN()
 	go device.RoutineTUNEventReader()
+	go device.RoutinePortRotation()
 
 	return device
 }

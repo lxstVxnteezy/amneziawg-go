@@ -401,7 +401,13 @@ retry:
 	// We limit the MTU well below the 65k max for practicality, but this means a remote host can still send us
 	// huge packets. Just try again when this happens. The infinite loop this could cause is still limited to
 	// attacker bandwidth, just like the rest of the receive path.
-	if windows.Errno(results[0].Status) == windows.WSAEMSGSIZE {
+	//
+	// WSAECONNRESET/WSAENETRESET report an ICMP unreachable for something we
+	// sent earlier (e.g. to a peer that has just moved to another port). They
+	// say nothing about this socket, and returning them would stop the
+	// receive routine for good, so skip them as well.
+	if status := windows.Errno(results[0].Status); status == windows.WSAEMSGSIZE ||
+		status == windows.WSAECONNRESET || status == windows.WSAENETRESET {
 		if isOpen.Load() != 1 {
 			return 0, nil, net.ErrClosed
 		}

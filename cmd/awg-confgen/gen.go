@@ -60,6 +60,10 @@ type Bundle struct {
 	Address netip.Addr
 	Obf     Obfuscation
 	Clients []Client
+
+	// Warnings are things the user should know about the generated
+	// configs, e.g. an SNI that does not match the server's address.
+	Warnings []string
 }
 
 // Timer ranges match the defaults AmneziaVPN ships for AWG 3.1.
@@ -227,8 +231,20 @@ func Generate(opts Options) (*Bundle, error) {
 	if hostBits := 32 - opts.Subnet.Bits(); hostBits >= 31 || opts.Clients > (1<<hostBits)-3 {
 		return nil, fmt.Errorf("subnet %s is too small for %d clients", opts.Subnet, opts.Clients)
 	}
+	var warnings []string
 	if opts.SNI == "" {
-		opts.SNI = defaultSNIs[randInt(0, len(defaultSNIs)-1)]
+		// A ClientHello for a domain that resolves to the server is
+		// consistent: a DPI comparing SNI with the destination IP sees
+		// nothing odd. A popular site on a VPS address is easy to flag.
+		if host, err := normalizeSNI(opts.Endpoint); err == nil {
+			opts.SNI = host
+		} else {
+			opts.SNI = defaultSNIs[randInt(0, len(defaultSNIs)-1)]
+			warnings = append(warnings, fmt.Sprintf(
+				"-endpoint is not a domain name, so the SNI is %s, which does not resolve to the server; "+
+					"a DPI comparing SNI with the destination IP can flag it. "+
+					"Point a domain of yours at the server and pass it as -endpoint or -sni.", opts.SNI))
+		}
 	}
 	sni, err := normalizeSNI(opts.SNI)
 	if err != nil {
@@ -244,10 +260,11 @@ func Generate(opts Options) (*Bundle, error) {
 	}
 
 	b := &Bundle{
-		Opts:    opts,
-		Server:  newKeyPair(),
-		Address: opts.Subnet.Addr().Next(),
-		Obf:     newObfuscation(),
+		Opts:     opts,
+		Server:   newKeyPair(),
+		Address:  opts.Subnet.Addr().Next(),
+		Obf:      newObfuscation(),
+		Warnings: warnings,
 	}
 	addr := b.Address
 	for i := range opts.Clients {

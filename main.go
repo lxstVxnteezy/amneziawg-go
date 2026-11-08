@@ -30,6 +30,11 @@ const (
 	ENV_WG_TUN_FD             = "WG_TUN_FD"
 	ENV_WG_UAPI_FD            = "WG_UAPI_FD"
 	ENV_WG_PROCESS_FOREGROUND = "WG_PROCESS_FOREGROUND"
+
+	// ENV_AWG_PORT_ROTATION enables local port rotation ("120-300" seconds).
+	// amneziawg-tools does not know the port_rotation key, so with
+	// awg-quick this variable is the way to turn it on.
+	ENV_AWG_PORT_ROTATION = "AWG_PORT_ROTATION"
 )
 
 func printUsage() {
@@ -225,6 +230,13 @@ func main() {
 	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger)
 
 	logger.Verbosef("Device started")
+
+	if rot := os.Getenv(ENV_AWG_PORT_ROTATION); rot != "" {
+		if err := device.IpcSet("port_rotation=" + rot + "\n"); err != nil {
+			logger.Errorf("Bad %s: %v", ENV_AWG_PORT_ROTATION, err)
+			os.Exit(ExitSetupFailed)
+		}
+	}
 
 	errs := make(chan error)
 	term := make(chan os.Signal, 1)

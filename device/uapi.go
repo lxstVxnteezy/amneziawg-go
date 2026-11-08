@@ -187,6 +187,9 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 		}
 		boolf("random_trailers", device.randomTrailers.Load())
 		boolf("disable_cookies", device.disableCookies.Load())
+		if rang := device.portRotation.Load(); !rang.IsZero() {
+			sendf("port_rotation=%s", rang.ToString())
+		}
 
 		for _, peer := range device.peers.keyMap {
 			// Serialize peer state.
@@ -331,6 +334,7 @@ func (device *Device) handleDeviceLine(ipcDev *ipcSetDevice, key, value string) 
 
 			device.net.Lock()
 			device.net.port = uint16(port)
+			device.net.portExplicit = port != 0
 			device.net.Unlock()
 
 			if err := device.BindUpdate(); err != nil {
@@ -591,6 +595,22 @@ func (device *Device) handleDeviceLine(ipcDev *ipcSetDevice, key, value string) 
 		ipcDev.later(func() error {
 			device.log.Verbosef("UAPI: Updating disable cookies")
 			device.disableCookies.Store(val)
+			return nil
+		})
+
+	case "port_rotation":
+		// seconds between local port changes, e.g. "120-300"; "0" disables
+		var rang UintRange
+		if err := rang.FromString(value); err != nil {
+			return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse port_rotation: %w", err)
+		}
+		if !rang.IsZero() && rang.Lo() < minPortRotationSec {
+			return ipcErrorf(ipc.IpcErrorInvalid, "port_rotation must be at least %d seconds", minPortRotationSec)
+		}
+		ipcDev.later(func() error {
+			device.log.Verbosef("UAPI: Updating port rotation")
+			device.portRotation.Store(rang)
+			device.kickPortRotation()
 			return nil
 		})
 
