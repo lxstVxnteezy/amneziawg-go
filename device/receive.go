@@ -138,6 +138,8 @@ func (device *Device) RoutineReceiveIncoming(
 		// handle each packet in the batch
 		for i, size := range sizes[:count] {
 			if size < MinMessageSize {
+				// too short for AWG: someone else's datagram
+				device.forwardFallback(endpoints[i], bufsArrs[i][:size])
 				continue
 			}
 
@@ -255,6 +257,15 @@ func (device *Device) RoutineReceiveIncoming(
 
 			default:
 				device.log.Verbosef("Received message with unknown type")
+				if _, ok := device.fallbackTarget(); ok {
+					// undo the header protection applied to the first
+					// bytes above (a XOR), so the datagram goes out as it came
+					full := bufsArrs[i][:size]
+					if cip != nil {
+						applyHash(full[:4], full[:4], typeHash)
+					}
+					device.forwardFallback(endpoints[i], full)
+				}
 				continue
 			}
 

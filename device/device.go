@@ -137,6 +137,9 @@ type Device struct {
 	// (see RoutinePortRotation); zero disables it.
 	portRotation     AtomicUintRange
 	portRotationKick chan struct{}
+
+	// fallback relays non-AWG datagrams to a real server (see fallback.go)
+	fallback fallback
 }
 
 // deviceState represents the state of a Device.
@@ -456,6 +459,7 @@ func (device *Device) Close() {
 	device.state.stopping.Wait()
 
 	device.rate.limiter.Close()
+	device.fallback.close()
 
 	device.log.Verbosef("Device closed")
 	close(device.closed)

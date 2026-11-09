@@ -160,6 +160,38 @@ Notes:
 - Packets the server sends in the short gap before it learns the new port are lost. TCP resends them.
 - Every rotation is a new handshake that resends the same I-packets, so very short intervals make the repeats more visible. A few minutes is a reasonable interval.
 
+### Fallback to a real site [server-side, this fork]
+
+A port that silently drops everything that is not AWG is itself a signal: an active prober can send a QUIC Initial to 443/UDP and conclude "this is not a website". With a fallback the server relays every datagram that is not AWG to another UDP server on the same machine, typically a real HTTP/3 site (Caddy, nginx), and sends its answers back from the AWG port. To a prober the port then behaves like an ordinary HTTP/3 website.
+
+```
+[Device]
++ fallback = "ip:port - server-side" # e.g. 127.0.0.1:8443; "off" disables
+```
+
+Only datagrams that cannot be AWG are relayed: ones shorter than any AWG message and ones whose type matches none of H1-H4 at the expected S1-S4 size. AWG traffic never reaches the site, and clients need nothing: official apps keep working. The I-packets of your own clients are QUIC Initials too, so they get relayed as well and the site answers them, which is what a real HTTP/3 server would do; clients ignore those answers.
+
+Use the same domain for the site's certificate and for the SNI of the I-packets, so the probe and the clients' Initials agree.
+
+> [!IMPORTANT]
+> Any domain works, but a prober can resolve the domain from the certificate (and from the SNI of the I-packets) and compare it with the server's IP. With someone else's domain (`google.com`, `yandex.ru`) they will not match, and you cannot get a valid certificate for it either, so the site answers with a self-signed one. For the disguise to hold up:
+> - use your own domain whose A record points to this server, DNS only (no Cloudflare proxy: then the domain resolves to Cloudflare's IPs);
+> - give the site a real certificate for that domain (Let's Encrypt; Caddy does it automatically over TCP 443, which AWG does not use);
+> - serve the same site over TCP 443 as well, with `Alt-Svc: h3=":443"`, like any HTTP/3 website;
+> - put something plausible on it rather than an empty page.
+>
+> A mismatch between SNI and IP alone is a weak signal (CDNs and shared hosting produce plenty of them), so a borrowed domain still beats silence, but your own domain removes the signal entirely.
+
+As with port rotation, amneziawg-tools rejects the key in a config file; with awg-quick set it in the environment of the server interface:
+
+```
+# /etc/systemd/system/awg-quick@awg0.service.d/fallback.conf
+[Service]
+Environment=AWG_FALLBACK=127.0.0.1:8443
+```
+
+At most 1024 remote addresses are relayed at once, each through its own local socket that closes after 60 s of silence. Make the site listen on 127.0.0.1 only, so it is reachable through the AWG port alone.
+
 ### Junk packets
 
 The amount of junk packets specified in `Jc` with a random size between `Jmin` and `Jmax` would be generated and sent prior every handshake

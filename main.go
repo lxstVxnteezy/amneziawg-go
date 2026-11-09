@@ -35,6 +35,10 @@ const (
 	// amneziawg-tools does not know the port_rotation key, so with
 	// awg-quick this variable is the way to turn it on.
 	ENV_AWG_PORT_ROTATION = "AWG_PORT_ROTATION"
+
+	// ENV_AWG_FALLBACK relays non-AWG datagrams to a real UDP server, e.g.
+	// "127.0.0.1:8443" for an HTTP/3 site on the same machine (server only).
+	ENV_AWG_FALLBACK = "AWG_FALLBACK"
 )
 
 func printUsage() {
@@ -231,6 +235,13 @@ func main() {
 	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger)
 
 	logger.Verbosef("Device started")
+
+	if fb := os.Getenv(ENV_AWG_FALLBACK); fb != "" {
+		if err := device.IpcSet("fallback=" + fb + "\n"); err != nil {
+			logger.Errorf("Bad %s: %v", ENV_AWG_FALLBACK, err)
+			os.Exit(ExitSetupFailed)
+		}
+	}
 
 	if rot := os.Getenv(ENV_AWG_PORT_ROTATION); rot != "" {
 		if err := device.IpcSet("port_rotation=" + rot + "\n"); err != nil {

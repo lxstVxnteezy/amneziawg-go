@@ -190,6 +190,9 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 		if rang := device.portRotation.Load(); !rang.IsZero() {
 			sendf("port_rotation=%s", rang.ToString())
 		}
+		if target, ok := device.fallbackTarget(); ok {
+			sendf("fallback=%s", target)
+		}
 
 		for _, peer := range device.peers.keyMap {
 			// Serialize peer state.
@@ -595,6 +598,23 @@ func (device *Device) handleDeviceLine(ipcDev *ipcSetDevice, key, value string) 
 		ipcDev.later(func() error {
 			device.log.Verbosef("UAPI: Updating disable cookies")
 			device.disableCookies.Store(val)
+			return nil
+		})
+
+	case "fallback":
+		// UDP server that gets every non-AWG datagram, e.g. 127.0.0.1:8443
+		// (a real HTTP/3 site); "off" or empty disables
+		var target netip.AddrPort
+		if value != "" && value != "off" {
+			t, err := netip.ParseAddrPort(value)
+			if err != nil {
+				return ipcErrorf(ipc.IpcErrorInvalid, "failed to parse fallback (want ip:port): %w", err)
+			}
+			target = t
+		}
+		ipcDev.later(func() error {
+			device.log.Verbosef("UAPI: Updating fallback")
+			device.SetFallback(target)
 			return nil
 		})
 
