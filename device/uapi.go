@@ -193,6 +193,10 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 		if target, ok := device.fallbackTarget(); ok {
 			sendf("fallback=%s", target)
 		}
+		sendf("diag_version=1") // see diag.go; ignored by amneziawg-tools
+		for _, line := range device.diagSourceLines() {
+			sendf("%s", line)
+		}
 
 		for _, peer := range device.peers.keyMap {
 			// Serialize peer state.
@@ -215,6 +219,11 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 			sendf("last_handshake_time_nsec=%d", nano)
 			sendf("tx_bytes=%d", peer.txBytes.Load())
 			sendf("rx_bytes=%d", peer.rxBytes.Load())
+			sendf("diag_handshake_inits=%d", peer.diag.initsReceived.Load())
+			sendf("diag_last_init_sec=%d", unixSec(peer.diag.lastInit.Load()))
+			sendf("diag_handshake_responses=%d", peer.diag.responsesSent.Load())
+			sendf("diag_last_transport_sec=%d", unixSec(peer.diag.lastTransport.Load()))
+			sendf("diag_session_start_sec=%d", unixSec(peer.diag.transportStart.Load()))
 
 			if keepalive := peer.persistentKeepaliveInterval.Load(); !keepalive.IsZero() {
 				sendf("persistent_keepalive_interval=%s", keepalive.ToString())

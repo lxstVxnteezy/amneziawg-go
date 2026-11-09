@@ -140,6 +140,9 @@ type Device struct {
 
 	// fallback relays non-AWG datagrams to a real server (see fallback.go)
 	fallback fallback
+
+	// diag counts non-AWG and invalid datagrams per source (see diag.go)
+	diag diagSources
 }
 
 // deviceState represents the state of a Device.

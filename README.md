@@ -192,6 +192,21 @@ Environment=AWG_FALLBACK=127.0.0.1:8443
 
 At most 1024 remote addresses are relayed at once, each through its own local socket that closes after 60 s of silence. Make the site listen on 127.0.0.1 only, so it is reachable through the AWG port alone.
 
+### Diagnostic counters [server-side, this fork]
+
+The fork counts, from the server's side, how far each client's connection gets, so a failure can be placed before anything is changed:
+
+- per peer: handshake initiations received, responses sent, the last authenticated transport packet (data or keepalive) and the start of the current session;
+- per source IP: datagrams that are not AWG with this server's parameters (junk, I-packets, foreign traffic, or AWG with other parameters), handshakes that do not verify (an unknown key, e.g. an outdated config) and data for a session the server does not know (after a restart or a reissue).
+
+They are part of the UAPI `get` output (`diag_version`, `diag_source`, `diag_handshake_inits`, `diag_last_init_sec`, `diag_handshake_responses`, `diag_last_transport_sec`, `diag_session_start_sec`). amneziawg-tools ignores unknown keys, so `awg show` is unaffected; read them from the socket:
+
+```
+printf 'get=1\n\n' | nc -U -q1 /var/run/amneziawg/awg0.sock | grep ^diag_
+```
+
+The source table keeps at most 1024 addresses. Counters reset when the interface restarts.
+
 ### Junk packets
 
 The amount of junk packets specified in `Jc` with a random size between `Jmin` and `Jmax` would be generated and sent prior every handshake

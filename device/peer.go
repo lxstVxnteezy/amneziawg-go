@@ -16,6 +16,7 @@ import (
 )
 
 type Peer struct {
+	diag              peerDiag // see diag.go
 	isRunning         atomic.Bool
 	keypairs          Keypairs
 	handshake         Handshake

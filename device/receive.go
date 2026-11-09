@@ -139,6 +139,7 @@ func (device *Device) RoutineReceiveIncoming(
 		for i, size := range sizes[:count] {
 			if size < MinMessageSize {
 				// too short for AWG: someone else's datagram
+				device.diagSource(endpoints[i], diagUnknown, size)
 				device.forwardFallback(endpoints[i], bufsArrs[i][:size])
 				continue
 			}
@@ -199,12 +200,14 @@ func (device *Device) RoutineReceiveIncoming(
 				value := device.indexTable.Lookup(receiver)
 				keypair := value.keypair
 				if keypair == nil {
+					device.diagSource(endpoints[i], diagStaleSession, size)
 					continue
 				}
 
 				// check keypair expiry
 
 				if keypair.created.Add(device.keychainExpireTime()).Before(now) {
+					device.diagSource(endpoints[i], diagStaleSession, size)
 					continue
 				}
 
@@ -257,6 +260,7 @@ func (device *Device) RoutineReceiveIncoming(
 
 			default:
 				device.log.Verbosef("Received message with unknown type")
+				device.diagSource(endpoints[i], diagUnknown, size)
 				if _, ok := device.fallbackTarget(); ok {
 					// undo the header protection applied to the first
 					// bytes above (a XOR), so the datagram goes out as it came
@@ -384,6 +388,7 @@ func (device *Device) RoutineHandshake(id int) {
 
 			if !device.cookieChecker.CheckMAC1(elem.packet) {
 				device.log.Verbosef("Received packet with invalid mac1")
+				device.diagSource(elem.endpoint, diagInvalidHandshake, len(elem.packet))
 				goto skip
 			}
 
@@ -431,8 +436,10 @@ func (device *Device) RoutineHandshake(id int) {
 			peer := device.ConsumeMessageInitiation(&msg)
 			if peer == nil {
 				device.log.Verbosef("Received invalid initiation message from %s", elem.endpoint.DstToString())
+				device.diagSource(elem.endpoint, diagInvalidHandshake, len(elem.packet))
 				goto skip
 			}
+			peer.diagInit()
 
 			// update timers
 
@@ -445,7 +452,9 @@ func (device *Device) RoutineHandshake(id int) {
 			device.log.Verbosef("%v - Received handshake initiation", peer)
 			peer.rxBytes.Add(uint64(len(elem.packet)))
 
-			peer.SendHandshakeResponse()
+			if err := peer.SendHandshakeResponse(); err == nil {
+				peer.diag.responsesSent.Add(1)
+			}
 
 		case MessageResponseType:
 
@@ -528,6 +537,7 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 			}
 
 			validTailPacket = i
+			peer.diagTransport()
 			if peer.ReceivedWithKeypair(elem.keypair) {
 				peer.SetEndpointFromPacket(elem.endpoint)
 				peer.timersHandshakeComplete()
