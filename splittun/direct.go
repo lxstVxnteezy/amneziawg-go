@@ -29,6 +29,7 @@ type direct struct {
 	dial   Dialer
 	out    func([]byte)
 	log    Logger
+	refuse func(netip.AddrPort) bool // connections answered with a reset
 	handle *channel.NotificationHandle
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -90,6 +91,10 @@ func addrPort(a tcpip.Address, port uint16) netip.AddrPort {
 func (x *direct) handleTCP(r *tcp.ForwarderRequest) {
 	id := r.ID()
 	dst := addrPort(id.LocalAddress, id.LocalPort)
+	if x.refuse != nil && x.refuse(dst) {
+		r.Complete(true)
+		return
+	}
 	x.wg.Add(1)
 	go func() {
 		defer x.wg.Done()

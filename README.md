@@ -202,7 +202,9 @@ Package `splittun` wraps the client's TUN and sends chosen sites past the tunnel
 - Everything else, other DNS queries included, goes into the tunnel unchanged. A flow keeps its path for its whole life: a connection that started in the tunnel is not moved when its address becomes direct.
 - `ParseRules("preset:ru, example.org", "198.51.100.0/24", "77.88.8.8")`; `preset:ru` is the Russian zones (.ru, .su, .рф, .москва) and big Russian services on other zones (VK, Yandex, ...).
 
-The direct connections are made by the process itself, so it must not route into its own tunnel: on Android the VPN excludes the app (`addDisallowedApplication`). DNS-over-HTTPS in an app bypasses the interception; such an app reaches listed sites through the tunnel.
+The direct connections are made by the process itself, so it must not route into its own tunnel: on Android the VPN excludes the app (`addDisallowedApplication`).
+
+Encrypted DNS would hide the queries: Android's automatic Private DNS tries DNS over TLS to the tunnel's resolver, and Chrome's automatic secure DNS upgrades 1.1.1.1 to DNS over HTTPS. Pass the tunnel's DNS servers as `Config.Resolvers`: TCP to them on 853 and 443 is answered with a reset and UDP on those ports is dropped, so both fall back to plain DNS. Private DNS set to a specific hostname, and apps with their own DoH server, still bypass the interception; their traffic to listed sites goes through the tunnel.
 
 ### Diagnostic counters [server-side, this fork]
 

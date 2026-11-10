@@ -224,7 +224,8 @@ func newRig(t *testing.T) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, err := New(p.ct.TUN(), Config{Rules: rules, Dial: w.dial, Log: t.Logf})
+	d, err := New(p.ct.TUN(), Config{Rules: rules, Dial: w.dial, Log: t.Logf,
+		Resolvers: []netip.Addr{netip.MustParseAddr("10.0.0.53")}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,4 +406,29 @@ func TestFlowsDoNotSwitchPaths(t *testing.T) {
 	if !d.isDirect(netip.MustParseAddr("93.184.216.34")) {
 		t.Fatal("learned address not direct")
 	}
+}
+
+// Encrypted DNS to the tunnel's resolver is refused at once, so the
+// system falls back to plain DNS; other HTTPS to it still works.
+func TestEncryptedDNSRefused(t *testing.T) {
+	r := newRig(t)
+	for _, to := range []string{"10.0.0.53:853", "10.0.0.53:443"} {
+		start := time.Now()
+		c, err := r.phone.dialTCP(t, to, 5*time.Second)
+		if err == nil {
+			c.Close()
+			t.Fatalf("%s accepted", to)
+		}
+		if time.Since(start) > 2*time.Second {
+			t.Fatalf("%s: refused only after %v (timeout instead of a reset?)", to, time.Since(start))
+		}
+	}
+	select {
+	case pkt := <-r.tunnel:
+		t.Fatalf("encrypted DNS leaked into the tunnel: %x", pkt[:20])
+	default:
+	}
+	// port 53 to it still goes into the tunnel for unlisted names
+	go r.phone.dialTCP(t, "10.0.0.53:53", 2*time.Second)
+	r.toTunnel(t, netip.MustParseAddrPort("10.0.0.53:53"))
 }

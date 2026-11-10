@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,8 +24,13 @@ type Logger func(format string, args ...any)
 // Config of a split tunnel.
 type Config struct {
 	Rules Rules
-	Dial  Dialer // nil: net.Dialer
-	Log   Logger // nil: silent
+	// Resolvers are the tunnel's DNS servers. Encrypted DNS to them
+	// (DNS over TLS on 853, DNS over HTTPS/QUIC on 443) is refused, so
+	// that Android's automatic Private DNS and Chrome's automatic secure
+	// DNS fall back to plain DNS, which the wrapper sees.
+	Resolvers []netip.Addr
+	Dial      Dialer // nil: net.Dialer
+	Log       Logger // nil: silent
 }
 
 const (
@@ -103,6 +109,9 @@ func New(inner tun.Device, cfg Config) (*Device, error) {
 	if d.stack, err = newDirect(mtu, cfg.Dial, d.writeToOS, cfg.Log); err != nil {
 		return nil, err
 	}
+	d.stack.refuse = func(ap netip.AddrPort) bool {
+		return (ap.Port() == 853 || ap.Port() == 443) && slices.Contains(d.cfg.Resolvers, ap.Addr())
+	}
 	go d.pump()
 	go d.sweep()
 	return d, nil
@@ -164,6 +173,12 @@ func (d *Device) route(pkt []byte) bool {
 	sport := binary.BigEndian.Uint16(pkt[ihl:])
 	dport := binary.BigEndian.Uint16(pkt[ihl+2:])
 
+	if len(d.domains) > 0 && (dport == 853 || dport == 443) && slices.Contains(d.cfg.Resolvers, dst) {
+		if proto == 6 && len(pkt) >= ihl+14 && pkt[ihl+13]&0x12 == 0x02 {
+			d.stack.inject(pkt) // the stack answers with a reset
+		}
+		return false // UDP (DoQ, DoH3): dropped
+	}
 	if proto == 17 && dport == 53 && len(d.domains) > 0 {
 		if q, ok := parseQuery(pkt[ihl+8:]); ok && d.domains.match(q.name) {
 			d.Stats.DirectQueries.Add(1)
