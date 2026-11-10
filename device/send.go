@@ -138,11 +138,15 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 
 	var sendBuffer [][]byte
 
-	for _, ipacket := range peer.device.ipackets {
+	for i, ipacket := range peer.device.ipackets {
 		if ipacket != nil {
-			buf := make([]byte, ipacket.ObfuscatedLen(0))
-			ipacket.Obfuscate(buf, nil)
-			sendBuffer = append(sendBuffer, buf)
+			bufs, err := ipacket.Datagrams()
+			if err != nil {
+				// the handshake still goes out, without this disguise
+				peer.device.log.Errorf("%v - Failed to build I%d: %v", peer, i+1, err)
+				continue
+			}
+			sendBuffer = append(sendBuffer, bufs...)
 		}
 	}
 

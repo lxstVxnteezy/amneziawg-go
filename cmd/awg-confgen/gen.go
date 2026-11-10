@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/amnezia-vpn/amneziawg-go/v3/quicinitial"
 	"golang.org/x/crypto/curve25519"
 )
 
@@ -29,6 +30,11 @@ type Options struct {
 	// more recognizable message type, but leaves the server without
 	// handshake flood protection.
 	DisableCookies bool
+
+	// Fork writes I1 = <quic sni=...>: clients running this fork build a
+	// fresh QUIC Initial flight before every handshake instead of resending
+	// fixed bytes. Official AmneziaWG clients reject the tag.
+	Fork bool
 }
 
 type keyPair struct {
@@ -205,7 +211,7 @@ func newObfuscation() Obfuscation {
 }
 
 func iPackets(sni string) ([]string, error) {
-	initials, err := quicInitials(sni)
+	initials, err := quicinitial.Flight(sni, quicinitial.Options{})
 	if err != nil {
 		return nil, err
 	}
@@ -269,9 +275,11 @@ func Generate(opts Options) (*Bundle, error) {
 	addr := b.Address
 	for i := range opts.Clients {
 		addr = addr.Next()
-		ipk, err := iPackets(opts.SNI)
-		if err != nil {
-			return nil, err
+		ipk := []string{"<quic sni=" + opts.SNI + ">"}
+		if !opts.Fork {
+			if ipk, err = iPackets(opts.SNI); err != nil {
+				return nil, err
+			}
 		}
 		b.Clients = append(b.Clients, Client{
 			Name:     fmt.Sprintf("client%d", i+1),

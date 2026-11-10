@@ -15,6 +15,7 @@ import (
 	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
 	"github.com/amnezia-vpn/amneziawg-go/v3/conn/bindtest"
 	"github.com/amnezia-vpn/amneziawg-go/v3/device"
+	"github.com/amnezia-vpn/amneziawg-go/v3/quicinitial"
 	"github.com/amnezia-vpn/amneziawg-go/v3/tun/tuntest"
 )
 
@@ -211,6 +212,88 @@ func TestGeneratedConfigsWorkInCore(t *testing.T) {
 	}
 }
 
+// With -fork the client builds its QUIC Initials itself: the flight on the
+// wire is a valid Initial for the SNI, the tunnel works, and the next
+// handshake sends a different connection attempt.
+func TestForkClientsGenerateInitials(t *testing.T) {
+	b, err := Generate(Options{Endpoint: "vpn.example.com", Port: 443, Clients: 1,
+		Subnet: netip.MustParsePrefix("10.66.66.0/24"), MTU: 1280, WAN: "eth0", Fork: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := b.Clients[0]
+	if len(c.IPackets) != 1 || c.IPackets[0] != "<quic sni=vpn.example.com>" {
+		t.Fatalf("I-packets %q", c.IPackets)
+	}
+	binds := bindtest.NewChannelBinds()
+	rec := &recordingBind{Bind: binds[1]}
+	srvTun, cliTun := tuntest.NewChannelTUN(), tuntest.NewChannelTUN()
+	srv := device.NewDevice(srvTun.TUN(), binds[0], device.NewLogger(device.LogLevelError, "server: "))
+	cli := device.NewDevice(cliTun.TUN(), rec, device.NewLogger(device.LogLevelError, "client: "))
+	t.Cleanup(srv.Close)
+	t.Cleanup(cli.Close)
+	if err := srv.IpcSet(toUAPI(t, b.ServerConfig(), "")); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Up(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.IpcSet(toUAPI(t, b.ClientConfig(c), "127.0.0.1:"+listenPort(t, srv))); err != nil {
+		t.Fatalf("client config rejected by core: %v", err)
+	}
+	if err := cli.Up(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ipcGet(t, cli), "i1=<quic sni=vpn.example.com>") {
+		t.Fatal("the tag does not round-trip through UAPI")
+	}
+
+	flight := func() quicinitial.Info {
+		t.Helper()
+		rec.mu.Lock()
+		sent := rec.sent
+		rec.sent = nil
+		rec.mu.Unlock()
+		if len(sent) < 2+b.Obf.Jc+1 {
+			t.Fatalf("only %d datagrams sent", len(sent))
+		}
+		info, err := quicinitial.Parse(sent[:2])
+		if err != nil {
+			t.Fatalf("first datagrams are not a QUIC Initial flight: %v", err)
+		}
+		if info.SNI != "vpn.example.com" || info.ALPN != "h3" {
+			t.Fatalf("flight carries SNI %q ALPN %q", info.SNI, info.ALPN)
+		}
+		return info
+	}
+
+	transit(t, cliTun, srvTun, c.Address, b.Address)
+	transit(t, srvTun, cliTun, b.Address, c.Address)
+	first := flight()
+
+	// a new session: Down drops the keys, the next packet needs a handshake
+	if err := cli.Down(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.Up(); err != nil {
+		t.Fatal(err)
+	}
+	transit(t, cliTun, srvTun, c.Address, b.Address)
+	second := flight()
+	if bytes.Equal(first.DCID, second.DCID) || bytes.Equal(first.ClientHello, second.ClientHello) {
+		t.Fatal("the second handshake repeats the first connection attempt")
+	}
+}
+
+func ipcGet(t *testing.T, d *device.Device) string {
+	t.Helper()
+	s, err := d.IpcGet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
 func TestGenerateUniquePerClientSecrets(t *testing.T) {
 	b, err := Generate(Options{Endpoint: "1.2.3.4", Port: 443, Clients: 50,
 		Subnet: netip.MustParsePrefix("10.0.0.0/26"), MTU: 1280, WAN: "eth0"})
@@ -270,8 +353,8 @@ func TestSNIFromURLReachesI1(t *testing.T) {
 	for _, ip := range b.Clients[0].IPackets {
 		pkts = append(pkts, mustHex(t, strings.TrimSuffix(strings.TrimPrefix(ip, "<b 0x"), ">")))
 	}
-	if sni, _ := sniFromClientHello(t, clientHelloFromInitials(t, pkts)); sni != "yandex.ru" {
-		t.Fatalf("I-packets carry SNI %q", sni)
+	if info, err := quicinitial.Parse(pkts); err != nil || info.SNI != "yandex.ru" {
+		t.Fatalf("I-packets carry SNI %q: %v", info.SNI, err)
 	}
 }
 
@@ -345,4 +428,13 @@ func TestDefaultSNIFollowsEndpoint(t *testing.T) {
 	if b.Opts.SNI != "my.domain.ru" || len(b.Warnings) != 0 {
 		t.Fatalf("explicit -sni: SNI %q, warnings %q", b.Opts.SNI, b.Warnings)
 	}
+}
+
+func mustHex(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(strings.TrimSpace(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
