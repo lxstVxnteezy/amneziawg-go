@@ -3,10 +3,27 @@ package device
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
 type obfBuilder func(val string) (obf, error)
+
+// maxObfLen bounds a generated field: nothing larger fits a UDP datagram.
+const maxObfLen = 65535
+
+// parseObfLen reads the length of <r N>, <rc N>, <rd N>. A negative one
+// used to pass and crash the device at the first handshake.
+func parseObfLen(val string) (int, error) {
+	n, err := strconv.Atoi(val)
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 || n > maxObfLen {
+		return 0, fmt.Errorf("length %d out of range 0-%d", n, maxObfLen)
+	}
+	return n, nil
+}
 
 var obfBuilders = map[string]obfBuilder{
 	"b":  newBytesObf,
@@ -29,11 +46,13 @@ type obf interface {
 type obfChain struct {
 	Spec string
 	obfs []obf
+	quic *quicFlight // <quic ...>: a whole generated flight instead of obfs
 }
 
 func newObfChain(spec string) (*obfChain, error) {
 	var (
 		obfs []obf
+		quic *quicFlight
 		errs []error
 	)
 
@@ -59,6 +78,17 @@ func newObfChain(spec string) (*obfChain, error) {
 		}
 
 		key := parts[0]
+		if key == "quic" {
+			if quic != nil {
+				errs = append(errs, errors.New("more than one <quic> tag"))
+			} else if q, err := newQuicFlight(parts[1:]); err != nil {
+				errs = append(errs, fmt.Errorf("failed to build <quic>: %w", err))
+			} else {
+				quic = q
+			}
+			remaining = remaining[end+1:]
+			continue
+		}
 		builder, ok := obfBuilders[key]
 		if !ok {
 			errs = append(errs, fmt.Errorf("unknown tag <%s>", key))
@@ -82,17 +112,32 @@ func newObfChain(spec string) (*obfChain, error) {
 		remaining = remaining[end+1:]
 	}
 
+	if quic != nil && len(obfs) > 0 {
+		errs = append(errs, errors.New("<quic> must be the only tag of its I-packet"))
+	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
 	}
-	if len(obfs) == 0 {
+	if len(obfs) == 0 && quic == nil {
 		return nil, nil
 	}
 
 	return &obfChain{
 		Spec: spec,
 		obfs: obfs,
+		quic: quic,
 	}, nil
+}
+
+// Datagrams returns what an I-packet puts on the wire before a handshake:
+// one datagram, or a generated flight for <quic>.
+func (c *obfChain) Datagrams() ([][]byte, error) {
+	if c.quic != nil {
+		return c.quic.datagrams()
+	}
+	buf := make([]byte, c.ObfuscatedLen(0))
+	c.Obfuscate(buf, nil)
+	return [][]byte{buf}, nil
 }
 
 func (c *obfChain) Obfuscate(dst, src []byte) {

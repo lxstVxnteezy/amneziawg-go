@@ -29,6 +29,7 @@ func main() {
 	flag.StringVar(&opts.SNI, "sni", "", "domain (or URL) put into the QUIC ClientHello of the I-packets (default: -endpoint if it is a domain, else a popular site)")
 	flag.StringVar(&opts.WAN, "wan", "", "server uplink interface used for NAT (default: detected from the default route)")
 	flag.BoolVar(&opts.DisableCookies, "disable-cookies", false, "turn off the cookie mechanism (no handshake flood protection)")
+	flag.BoolVar(&opts.Fork, "fork", false, "clients run this fork: I1 = <quic sni=...>, a new QUIC Initial before every handshake (official clients reject it)")
 	flag.StringVar(&out, "out", "awg-configs", "output directory")
 	flag.Parse()
 

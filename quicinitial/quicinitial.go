@@ -1,9 +1,12 @@
-package main
-
-// Builds a genuine QUIC v1 client Initial packet (RFC 9000/9001) carrying a
-// TLS 1.3 ClientHello. It is used as an AmneziaWG I-packet: a DPI box that
-// decrypts QUIC Initials (as SNI filters do) sees an ordinary HTTP/3
-// connection attempt to the chosen domain instead of random bytes.
+// Package quicinitial builds genuine QUIC v1 client Initial packets (RFC
+// 9000/9001) carrying a TLS 1.3 ClientHello shaped like current Chrome's.
+// They are used as AmneziaWG I-packets: a DPI box that decrypts QUIC
+// Initials (as SNI filters do) sees an ordinary HTTP/3 connection attempt
+// to the chosen domain instead of random bytes.
+//
+// awg-confgen writes them into configs as fixed bytes; the device builds a
+// fresh flight before every handshake for the <quic sni=...> tag.
+package quicinitial
 
 import (
 	"crypto/aes"
@@ -14,10 +17,51 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"math/big"
+	"net/netip"
 	"slices"
+	"strings"
 
 	"golang.org/x/crypto/curve25519"
 )
+
+func randInt(lo, hi int) int { // inclusive
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(hi-lo+1)))
+	if err != nil {
+		panic(err)
+	}
+	return lo + int(n.Int64())
+}
+
+// Options shape one flight.
+type Options struct {
+	// Classic drops the post-quantum key share (X25519MLKEM768), like
+	// Chrome before version 124: the ClientHello then fits one datagram.
+	Classic bool
+}
+
+// CheckSNI reports whether sni can go into a ClientHello: an ASCII host
+// name with a dot, not an IP address.
+func CheckSNI(sni string) error {
+	if _, err := netip.ParseAddr(sni); err == nil {
+		return fmt.Errorf("SNI %q must be a domain name, not an IP address", sni)
+	}
+	if len(sni) == 0 || len(sni) > 253 || !strings.Contains(sni, ".") {
+		return fmt.Errorf("SNI %q is not a valid domain name", sni)
+	}
+	for _, label := range strings.Split(sni, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return fmt.Errorf("SNI %q is not a valid domain name", sni)
+		}
+		for _, c := range label {
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+				return fmt.Errorf("SNI %q contains %q; use the punycode (xn--) form for non-ASCII names", sni, c)
+			}
+		}
+	}
+	return nil
+}
 
 var quicV1InitialSalt = []byte{
 	0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17,
@@ -164,7 +208,7 @@ func grease(used map[uint16]bool) uint16 {
 // shaped like the one current Chrome sends over HTTP/3: GREASE, hybrid
 // post-quantum key share (X25519MLKEM768), certificate compression,
 // ALPS and a shuffled extension order.
-func clientHello(sni string, scid []byte) ([]byte, error) {
+func clientHello(sni string, scid []byte, classic bool) ([]byte, error) {
 	var random [32]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return nil, err
@@ -177,9 +221,13 @@ func clientHello(sni string, scid []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	dk, err := mlkem.GenerateKey768()
-	if err != nil {
-		return nil, err
+	var mlkemKey []byte
+	if !classic {
+		dk, err := mlkem.GenerateKey768()
+		if err != nil {
+			return nil, err
+		}
+		mlkemKey = dk.EncapsulationKey().Bytes()
 	}
 
 	used := map[uint16]bool{}
@@ -207,8 +255,10 @@ func clientHello(sni string, scid []byte) ([]byte, error) {
 		var shares []byte
 		shares = append(shares, u16(greaseGroup)...)
 		shares = appendU16Prefixed(shares, []byte{0})
-		shares = append(shares, u16(0x11ec)...) // X25519MLKEM768
-		shares = appendU16Prefixed(shares, append(dk.EncapsulationKey().Bytes(), pub...))
+		if !classic {
+			shares = append(shares, u16(0x11ec)...) // X25519MLKEM768
+			shares = appendU16Prefixed(shares, append(mlkemKey, pub...))
+		}
 		shares = append(shares, u16(0x001d)...)
 		shares = appendU16Prefixed(shares, pub)
 		return extension(0x0033, appendU16Prefixed(nil, shares))
@@ -231,15 +281,19 @@ func clientHello(sni string, scid []byte) ([]byte, error) {
 		return extension(0x0039, tp)
 	}()
 
+	groups := u16(greaseGroup, 0x11ec, 0x001d, 0x0017, 0x0018)
+	if classic {
+		groups = u16(greaseGroup, 0x001d, 0x0017, 0x0018)
+	}
 	middle := [][]byte{
 		sniExt,
-		extension(0x000a, appendU16Prefixed(nil, u16(greaseGroup, 0x11ec, 0x001d, 0x0017, 0x0018))),
+		extension(0x000a, appendU16Prefixed(nil, groups)),
 		extension(0x000d, appendU16Prefixed(nil, u16(0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601))),
 		extension(0x0010, appendU16Prefixed(nil, []byte{2, 'h', '3'})),
 		extension(0x002b, append([]byte{4}, u16(greaseVersion, 0x0304)...)),
 		extension(0x002d, []byte{1, 1}),
 		keyShareExt,
-		extension(0x001b, []byte{2, 0x00, 0x02}), // compress_certificate: brotli
+		extension(0x001b, []byte{2, 0x00, 0x02}),                       // compress_certificate: brotli
 		extension(0x44cd, appendU16Prefixed(nil, []byte{2, 'h', '3'})), // application_settings
 		tpExt,
 	}
@@ -284,16 +338,20 @@ func cryptoFrame(offset int, data []byte) []byte {
 
 const cryptoFrameOverhead = 1 + 2 + 2
 
-// quicInitials returns the client Initial datagrams of one connection
-// attempt. The ClientHello with a post-quantum key share does not fit in one
-// datagram, so like Chrome it is split across consecutive Initial packets,
-// each padded to initialDatagram bytes.
-func quicInitials(sni string) ([][]byte, error) {
+// Flight returns the client Initial datagrams of one connection attempt,
+// with a fresh connection ID, random and key shares every time. The
+// ClientHello with a post-quantum key share does not fit in one datagram,
+// so like Chrome it is split across consecutive Initial packets (two),
+// each padded to 1250 bytes.
+func Flight(sni string, opts Options) ([][]byte, error) {
+	if err := CheckSNI(sni); err != nil {
+		return nil, err
+	}
 	dcid := make([]byte, 8)
 	if _, err := rand.Read(dcid); err != nil {
 		return nil, err
 	}
-	hello, err := clientHello(sni, nil)
+	hello, err := clientHello(sni, nil, opts.Classic)
 	if err != nil {
 		return nil, err
 	}
