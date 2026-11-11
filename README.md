@@ -193,6 +193,19 @@ Environment=AWG_FALLBACK=127.0.0.1:8443
 
 At most 1024 remote addresses are relayed at once, each through its own local socket that closes after 60 s of silence. Make the site listen on 127.0.0.1 only, so it is reachable through the AWG port alone.
 
+### Split tunneling by domain [client-side, this fork, library]
+
+Package `splittun` wraps the client's TUN and sends chosen sites past the tunnel by domain name, the way Xray-based clients route "geosite" rules, instead of a hand-made list of thousands of addresses in AllowedIPs:
+
+- DNS queries for listed domains (`ru`, `vk.com`, ...; subdomains included) are answered through a direct resolver (Yandex DNS by default), so the answers point at servers near the user; AAAA queries for them get an empty answer, so apps use IPv4.
+- The addresses from those answers (and listed networks) are remembered; new TCP and UDP flows to them are terminated in a userspace stack (gVisor) and re-originated by the process outside the tunnel.
+- Everything else, other DNS queries included, goes into the tunnel unchanged. A flow keeps its path for its whole life: a connection that started in the tunnel is not moved when its address becomes direct.
+- `ParseRules("preset:ru, example.org", "198.51.100.0/24", "77.88.8.8")`; `preset:ru` is the Russian zones (.ru, .su, .рф, .москва) and big Russian services on other zones (VK, Yandex, ...).
+
+The direct connections are made by the process itself, so it must not route into its own tunnel: on Android the VPN excludes the app (`addDisallowedApplication`).
+
+Encrypted DNS would hide the queries: Android's automatic Private DNS tries DNS over TLS to the tunnel's resolver, and Chrome's automatic secure DNS upgrades 1.1.1.1 to DNS over HTTPS. Pass the tunnel's DNS servers as `Config.Resolvers`: TCP to them on 853 and 443 is answered with a reset and UDP on those ports is dropped, so both fall back to plain DNS. Private DNS set to a specific hostname, and apps with their own DoH server, still bypass the interception; their traffic to listed sites goes through the tunnel.
+
 ### Diagnostic counters [server-side, this fork]
 
 The fork counts, from the server's side, how far each client's connection gets, so a failure can be placed before anything is changed:
