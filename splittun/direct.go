@@ -34,6 +34,32 @@ type direct struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	lmu  sync.Mutex
+	live map[tcpConn]int // TCP connections being relayed (see tcpLive)
+}
+
+// tcpConn names a relayed TCP connection by the app's and the remote's
+// address, as the wrapper's flow table does.
+type tcpConn struct{ src, dst netip.AddrPort }
+
+// tcpLive reports whether the stack still relays the app's connection
+// from src to dst.
+func (x *direct) tcpLive(src, dst netip.AddrPort) bool {
+	x.lmu.Lock()
+	defer x.lmu.Unlock()
+	return x.live[tcpConn{src, dst}] > 0
+}
+
+func (x *direct) trackTCP(c tcpConn, delta int) {
+	x.lmu.Lock()
+	defer x.lmu.Unlock()
+	if x.live == nil {
+		x.live = map[tcpConn]int{}
+	}
+	if x.live[c] += delta; x.live[c] <= 0 {
+		delete(x.live, c)
+	}
 }
 
 const nicID = 1
@@ -95,9 +121,12 @@ func (x *direct) handleTCP(r *tcp.ForwarderRequest) {
 		r.Complete(true)
 		return
 	}
+	conn := tcpConn{addrPort(id.RemoteAddress, id.RemotePort), dst}
+	x.trackTCP(conn, 1)
 	x.wg.Add(1)
 	go func() {
 		defer x.wg.Done()
+		defer x.trackTCP(conn, -1)
 		ctx, cancel := context.WithTimeout(x.ctx, 15*time.Second)
 		remote, err := x.dial(ctx, "tcp", dst.String())
 		cancel()

@@ -253,26 +253,38 @@ func (d *Device) sweep() {
 		case <-d.closed:
 			return
 		case now := <-t.C:
-			d.fmu.Lock()
-			for k, f := range d.flows {
-				idle := udpIdle
-				if k.proto == 6 {
-					idle = tcpIdle
-				}
-				if now.Sub(f.seen) > idle {
-					delete(d.flows, k)
-				}
-			}
-			d.fmu.Unlock()
-			d.amu.Lock()
-			for a, until := range d.addrs {
-				if now.After(until) {
-					delete(d.addrs, a)
-				}
-			}
-			d.amu.Unlock()
+			d.sweepOnce(now)
 		}
 	}
+}
+
+func (d *Device) sweepOnce(now time.Time) {
+	d.fmu.Lock()
+	for k, f := range d.flows {
+		idle := udpIdle
+		if k.proto == 6 {
+			idle = tcpIdle
+		}
+		if now.Sub(f.seen) <= idle {
+			continue
+		}
+		// A direct TCP connection may be silent for longer than that (a
+		// push channel, IMAP IDLE): while the stack still relays it, its
+		// flow stays, or its next packet would go into the tunnel, where
+		// nobody knows the connection.
+		if k.proto == 6 && f.direct && d.stack.tcpLive(k.src, k.dst) {
+			continue
+		}
+		delete(d.flows, k)
+	}
+	d.fmu.Unlock()
+	d.amu.Lock()
+	for a, until := range d.addrs {
+		if now.After(until) {
+			delete(d.addrs, a)
+		}
+	}
+	d.amu.Unlock()
 }
 
 func (d *Device) writeToOS(pkt []byte) {
@@ -289,7 +301,19 @@ func (d *Device) File() *os.File { return d.inner.File() }
 
 // Read gives the WireGuard device one packet bound for the tunnel.
 func (d *Device) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
-	pkt, ok := <-d.tunnel
+	// Close does not close d.tunnel when the pump is blocked on a full
+	// queue, so wait for d.closed too: the WireGuard device waits for its
+	// TUN reader when it shuts down.
+	var pkt []byte
+	ok := false
+	select {
+	case <-d.closed:
+	default:
+		select {
+		case pkt, ok = <-d.tunnel:
+		case <-d.closed:
+		}
+	}
 	if !ok {
 		if err, _ := d.readErr.Load().(error); err != nil {
 			return 0, err

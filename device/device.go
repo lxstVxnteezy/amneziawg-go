@@ -111,7 +111,8 @@ type Device struct {
 		transport atomic.Uint32
 	}
 
-	ipackets [5]*obfChain
+	// I1-I5. Replaced by IpcSet while handshakes read them, hence atomic.
+	ipackets [5]atomic.Pointer[obfChain]
 
 	headerProtection struct {
 		sync.RWMutex

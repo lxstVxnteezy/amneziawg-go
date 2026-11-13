@@ -1,7 +1,10 @@
 package outline_test
 
 import (
+	"context"
+	"net"
 	"testing"
+	"time"
 
 	awg "github.com/amnezia-vpn/amneziawg-go/v3/outline"
 	"golang.getoutline.org/sdk/x/mobileproxy"
@@ -39,6 +42,12 @@ fallback:
 var testDomains = mobileproxy.NewListFromLines("example.com")
 
 func Test_outlineIntegration(t *testing.T) {
+	// the smart dialer resolves and fetches example.com for real
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := net.DefaultResolver.LookupHost(ctx, "example.com"); err != nil {
+		t.Skipf("needs the internet: %v", err)
+	}
 	opts := mobileproxy.NewSmartDialerOptions(testDomains, cfg)
 	opts.SetLogWriter(mobileproxy.NewStderrLogWriter())
 	awg.RegisterFallbackParser(opts, "awg")

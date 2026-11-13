@@ -270,7 +270,14 @@ func TestForkClientsGenerateInitials(t *testing.T) {
 	transit(t, srvTun, cliTun, b.Address, c.Address)
 	first := flight()
 
-	// a new session: Down drops the keys, the next packet needs a handshake
+	// a new session: Down drops the keys, the next packet needs a handshake.
+	// Handshake timestamps (TAI64N) are rounded down to 2^24 ns, about
+	// 17 ms, and the server refuses an initiation whose timestamp is not
+	// newer than the last one (replay protection). Without the pause the
+	// second handshake often lands in the same step, is dropped, and the
+	// retry comes only after RekeyTimeout (3-7 s here): the test then
+	// failed more often than not.
+	time.Sleep(50 * time.Millisecond)
 	if err := cli.Down(); err != nil {
 		t.Fatal(err)
 	}

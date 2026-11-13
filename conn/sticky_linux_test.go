@@ -9,6 +9,7 @@ package conn
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"runtime"
@@ -240,6 +241,9 @@ func Test_listenConfig(t *testing.T) {
 	})
 	t.Run("IPv6", func(t *testing.T) {
 		conn, err := listenConfig().ListenPacket(context.Background(), "udp6", ":0")
+		if errors.Is(err, unix.EAFNOSUPPORT) {
+			t.Skip("this host has no IPv6")
+		}
 		if err != nil {
 			t.Fatal(err)
 		}

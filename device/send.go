@@ -138,8 +138,8 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 
 	var sendBuffer [][]byte
 
-	for i, ipacket := range peer.device.ipackets {
-		if ipacket != nil {
+	for i := range peer.device.ipackets {
+		if ipacket := peer.device.ipackets[i].Load(); ipacket != nil {
 			bufs, err := ipacket.Datagrams()
 			if err != nil {
 				// the handshake still goes out, without this disguise

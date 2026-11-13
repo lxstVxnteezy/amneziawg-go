@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -431,4 +433,136 @@ func TestEncryptedDNSRefused(t *testing.T) {
 	// port 53 to it still goes into the tunnel for unlisted names
 	go r.phone.dialTCP(t, "10.0.0.53:53", 2*time.Second)
 	r.toTunnel(t, netip.MustParseAddrPort("10.0.0.53:53"))
+}
+
+// A direct TCP connection that sits idle for longer than tcpIdle (a push
+// channel, IMAP IDLE, SSH) must stay on the direct path: forgetting its
+// flow would send its next packet into the tunnel, where nobody knows the
+// connection.
+func TestIdleDirectTCPStaysDirect(t *testing.T) {
+	r := newRig(t)
+	c, err := r.phone.dialTCP(t, "198.51.100.1:443", 5*time.Second)
+	if err != nil {
+		t.Fatalf("direct connect: %v", err)
+	}
+	defer c.Close()
+	roundTrip := func(msg string) {
+		t.Helper()
+		if _, err := c.Write([]byte(msg)); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, len(msg))
+		c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := io.ReadFull(c, got); err != nil || string(got) != msg {
+			t.Fatalf("echo %q: got %q, %v", msg, got, err)
+		}
+	}
+	directFlows := func() int {
+		r.dev.fmu.Lock()
+		defer r.dev.fmu.Unlock()
+		n := 0
+		for k, f := range r.dev.flows {
+			if k.proto == 6 && f.direct {
+				n++
+			}
+		}
+		return n
+	}
+	roundTrip("before the pause")
+	if directFlows() != 1 {
+		t.Fatalf("direct TCP flows: %d", directFlows())
+	}
+
+	r.dev.sweepOnce(time.Now().Add(tcpIdle + time.Minute))
+	if directFlows() != 1 {
+		t.Fatal("the flow of a live direct connection was forgotten after the idle time")
+	}
+	roundTrip("after the pause")
+	select {
+	case pkt := <-r.tunnel:
+		t.Fatalf("a packet of the direct connection went into the tunnel: %x", pkt[:40])
+	default:
+	}
+
+	// once the connection is over, the flow is forgotten as before
+	c.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r.dev.sweepOnce(time.Now().Add(tcpIdle + time.Minute))
+		if directFlows() == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the flow of a closed direct connection is never forgotten")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// Close must release a reader even when the tunnel queue is full: the
+// WireGuard device waits for its TUN reader in Close.
+func TestCloseReleasesReaderWithFullQueue(t *testing.T) {
+	ct := tuntest.NewChannelTUN()
+	d, err := New(ct.TUN(), Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt := make([]byte, 40)
+	pkt[0] = 0x60                     // IPv6: straight into the tunnel queue
+	for i := 0; i < queueLen+2; i++ { // one more than fits: the pump blocks on it
+		select {
+		case ct.Outbound <- pkt:
+		case <-time.After(time.Second):
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(d.tunnel) < queueLen {
+		if time.Now().After(deadline) {
+			t.Fatalf("queue holds %d of %d", len(d.tunnel), queueLen)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	d.Close()
+	done := make(chan error, 1)
+	go func() {
+		bufs, sizes := [][]byte{make([]byte, 2000)}, []int{0}
+		for {
+			if _, err := d.Read(bufs, sizes, 0); err != nil {
+				done <- err
+				return
+			}
+		}
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("Read after Close: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Read never returns after Close: device.Close() would hang")
+	}
+}
+
+// A reader blocked on an empty queue is released by Close as well.
+func TestCloseReleasesBlockedReader(t *testing.T) {
+	ct := tuntest.NewChannelTUN()
+	d, err := New(ct.TUN(), Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := d.Read([][]byte{make([]byte, 2000)}, []int{0}, 0)
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	d.Close()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Read returned a packet from an empty, closed device")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Read blocked on an empty queue is not released by Close")
+	}
 }
