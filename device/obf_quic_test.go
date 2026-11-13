@@ -81,7 +81,7 @@ func TestQuicTagViaUAPI(t *testing.T) {
 	if err := dev.IpcSet(uapiCfg("i1", "<quic sni=bad_name.com>")); err == nil || !strings.Contains(err.Error(), "I1") {
 		t.Fatalf("bad SNI: %v", err)
 	}
-	if got := dev.ipackets[0].Spec; got != "<quic sni=vk.com>" {
+	if got := dev.ipackets[0].Load().Spec; got != "<quic sni=vk.com>" {
 		t.Fatalf("a rejected config replaced I1: %q", got)
 	}
 }

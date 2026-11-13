@@ -56,7 +56,7 @@ func TestUAPIRejectedConfigLeavesPeersAndKeysAlone(t *testing.T) {
 	dev := pair[0].dev
 	privBefore := dev.staticIdentity.privateKey
 	peersBefore := len(dev.peers.keyMap)
-	ipacketBefore := dev.ipackets[0]
+	ipacketBefore := dev.ipackets[0].Load()
 	trailersBefore := dev.randomTrailers.Load()
 
 	var newPeer NoisePrivateKey
@@ -79,7 +79,7 @@ func TestUAPIRejectedConfigLeavesPeersAndKeysAlone(t *testing.T) {
 	if len(dev.peers.keyMap) != peersBefore {
 		t.Errorf("peers: %d before, %d after a rejected config", peersBefore, len(dev.peers.keyMap))
 	}
-	if dev.ipackets[0] != ipacketBefore || dev.randomTrailers.Load() != trailersBefore {
+	if dev.ipackets[0].Load() != ipacketBefore || dev.randomTrailers.Load() != trailersBefore {
 		t.Error("device options changed by a rejected config")
 	}
 }
