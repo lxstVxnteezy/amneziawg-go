@@ -137,6 +137,10 @@ func listenNet(network string, port int) (*net.UDPConn, int, error) {
 	return conn.(*net.UDPConn), uaddr.Port, nil
 }
 
+// listenNetFn is listenNet; tests replace it to stand for a host without
+// one of the address families.
+var listenNetFn = listenNet
+
 func (s *StdNetBind) Open(uport uint16) ([]ReceiveFunc, uint16, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -156,21 +160,37 @@ again:
 	var v4pc *ipv4.PacketConn
 	var v6pc *ipv6.PacketConn
 
-	v4conn, port, err = listenNet("udp4", port)
+	// A family the host does not have (EAFNOSUPPORT) is skipped. Its
+	// failed listen must not touch port: listenNet returns 0 with an
+	// error, and that 0 used to be reported as the listening port on
+	// hosts without IPv6 (and the requested port was lost on hosts without
+	// IPv4), so the next BindUpdate moved the device to a random port.
+	var v4port, v6port int
+	v4conn, v4port, err = listenNetFn("udp4", port)
 	if err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) {
 		return nil, 0, err
 	}
+	if v4conn != nil {
+		port = v4port
+	}
 
 	// Listen on the same port as we're using for ipv4.
-	v6conn, port, err = listenNet("udp6", port)
+	v6conn, v6port, err = listenNetFn("udp6", port)
 	if uport == 0 && errors.Is(err, syscall.EADDRINUSE) && tries < 100 {
-		v4conn.Close()
+		if v4conn != nil {
+			v4conn.Close()
+		}
 		tries++
 		goto again
 	}
 	if err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) {
-		v4conn.Close()
+		if v4conn != nil {
+			v4conn.Close()
+		}
 		return nil, 0, err
+	}
+	if v6conn != nil {
+		port = v6port
 	}
 	var fns []ReceiveFunc
 	if v4conn != nil {
