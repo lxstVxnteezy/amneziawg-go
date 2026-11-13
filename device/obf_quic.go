@@ -1,7 +1,6 @@
 package device
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
@@ -32,15 +31,16 @@ func newQuicFlight(args []string) (*quicFlight, error) {
 		case !strings.Contains(a, "=") && q.sni == "":
 			q.sni = a
 		default:
-			return nil, fmt.Errorf("unknown argument %q (want sni=<domain> and optionally classic)", a)
+			return nil, fmt.Errorf("unknown argument %q (want sni=<domain>, none for no SNI, and optionally classic)", a)
 		}
 	}
-	if q.sni == "" {
-		return nil, errors.New("missing sni=<domain>")
-	}
+	// no sni: a ClientHello without server_name, as a browser sends to an
+	// IP address; better than a domain that does not point at the server
 	q.sni = strings.ToLower(strings.TrimSuffix(q.sni, "."))
-	if err := quicinitial.CheckSNI(q.sni); err != nil {
-		return nil, err
+	if q.sni != "" {
+		if err := quicinitial.CheckSNI(q.sni); err != nil {
+			return nil, err
+		}
 	}
 	// build one now, so that a config that cannot work is rejected at
 	// configuration time and not silently at every handshake

@@ -286,7 +286,6 @@ func clientHello(sni string, scid []byte, classic bool) ([]byte, error) {
 		groups = u16(greaseGroup, 0x001d, 0x0017, 0x0018)
 	}
 	middle := [][]byte{
-		sniExt,
 		extension(0x000a, appendU16Prefixed(nil, groups)),
 		extension(0x000d, appendU16Prefixed(nil, u16(0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601))),
 		extension(0x0010, appendU16Prefixed(nil, []byte{2, 'h', '3'})),
@@ -297,6 +296,12 @@ func clientHello(sni string, scid []byte, classic bool) ([]byte, error) {
 		extension(0x44cd, appendU16Prefixed(nil, []byte{2, 'h', '3'})), // application_settings
 		tpExt,
 	}
+	// No SNI: what a browser sends when it connects to an IP address
+	// (TLS forbids an IP in server_name). Better than a popular domain
+	// that does not resolve to the server.
+	if sni != "" {
+		middle = append(middle, sniExt)
+	}
 	// Chrome shuffles its extensions. Keep SNI ahead of the large key
 	// share, so it lands in the first Initial packet where SNI-based DPI
 	// looks for it.
@@ -304,10 +309,12 @@ func clientHello(sni string, scid []byte, classic bool) ([]byte, error) {
 		j := randInt(0, i)
 		middle[i], middle[j] = middle[j], middle[i]
 	}
-	si := slices.IndexFunc(middle, func(e []byte) bool { return &e[0] == &sniExt[0] })
-	ki := slices.IndexFunc(middle, func(e []byte) bool { return &e[0] == &keyShareExt[0] })
-	if si > ki {
-		middle[si], middle[ki] = middle[ki], middle[si]
+	if sni != "" {
+		si := slices.IndexFunc(middle, func(e []byte) bool { return &e[0] == &sniExt[0] })
+		ki := slices.IndexFunc(middle, func(e []byte) bool { return &e[0] == &keyShareExt[0] })
+		if si > ki {
+			middle[si], middle[ki] = middle[ki], middle[si]
+		}
 	}
 
 	exts := extension(greaseExtFirst, nil)
@@ -342,10 +349,13 @@ const cryptoFrameOverhead = 1 + 2 + 2
 // with a fresh connection ID, random and key shares every time. The
 // ClientHello with a post-quantum key share does not fit in one datagram,
 // so like Chrome it is split across consecutive Initial packets (two),
-// each padded to 1250 bytes.
+// each padded to 1250 bytes. An empty sni leaves the server_name
+// extension out, as a browser does for an IP address.
 func Flight(sni string, opts Options) ([][]byte, error) {
-	if err := CheckSNI(sni); err != nil {
-		return nil, err
+	if sni != "" {
+		if err := CheckSNI(sni); err != nil {
+			return nil, err
+		}
 	}
 	dcid := make([]byte, 8)
 	if _, err := rand.Read(dcid); err != nil {
