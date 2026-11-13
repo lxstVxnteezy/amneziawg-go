@@ -276,8 +276,7 @@ func (device *Device) IpcSetOperation(r io.Reader) (err error) {
 		if !ok {
 			return ipcErrorf(
 				ipc.IpcErrorProtocol,
-				"failed to parse line %q",
-				line,
+				"expected key=value in configuration",
 			)
 		}
 
@@ -309,14 +308,13 @@ func (device *Device) IpcSetOperation(r io.Reader) (err error) {
 			return err
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return ipcErrorf(ipc.IpcErrorIO, "failed to read input: %w", err)
+	}
 	if err := ipcDev.mergeWithDevice(device); err != nil {
 		return err
 	}
 	peer.handlePostConfig()
-
-	if err := scanner.Err(); err != nil {
-		return ipcErrorf(ipc.IpcErrorIO, "failed to read input: %w", err)
-	}
 	return nil
 }
 
@@ -962,6 +960,13 @@ func (d *ipcSetDevice) mergeWithDevice(device *Device) *IPCError {
 
 	// Validate everything before storing anything, so a rejected config
 	// never leaves the device half-updated.
+	if d.paddings.transport > MaxContentSize {
+		return ipcErrorf(ipc.IpcErrorInvalid, "s4 exceeds transport buffer capacity (%d)", MaxContentSize)
+	}
+	// JunkPackets materializes the whole flight before sending it.
+	if d.junk.count > 256 {
+		return ipcErrorf(ipc.IpcErrorInvalid, "jc must not exceed 256")
+	}
 	if !d.headerProtectionKey.IsZero() {
 		paddings := []uint32{d.paddings.init, d.paddings.response, d.paddings.cookie, d.paddings.transport}
 		for i, padding := range paddings {

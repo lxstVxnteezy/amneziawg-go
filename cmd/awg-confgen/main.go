@@ -50,7 +50,7 @@ func main() {
 			fatal(err)
 		}
 		// configs contain private keys
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		if err := writePrivateConfig(path, content); err != nil {
 			fatal(err)
 		}
 		fmt.Println("wrote", path)
@@ -67,6 +67,23 @@ func main() {
 	for _, w := range b.Warnings {
 		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
+}
+
+// Replace old configs atomically, including those with overly broad permissions.
+func writePrivateConfig(path, content string) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".awg-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString(content); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
 
 func fatal(err error) {

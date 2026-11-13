@@ -74,6 +74,7 @@ func UAPIListen(name string, file *os.File) (net.Listener, error) {
 
 	uapi.inotifyFd, err = unix.InotifyInit()
 	if err != nil {
+		listener.Close()
 		return nil, err
 	}
 
@@ -86,19 +87,22 @@ func UAPIListen(name string, file *os.File) (net.Listener, error) {
 	)
 
 	if err != nil {
+		unix.Close(uapi.inotifyFd)
+		listener.Close()
 		return nil, err
 	}
 
 	uapi.inotifyRWCancel, err = rwcancel.NewRWCancel(uapi.inotifyFd)
 	if err != nil {
 		unix.Close(uapi.inotifyFd)
+		listener.Close()
 		return nil, err
 	}
 
 	go func(l *UAPIListener) {
-		var buf [0]byte
+		defer uapi.inotifyRWCancel.Close()
+		var buf [unix.SizeofInotifyEvent]byte
 		for {
-			defer uapi.inotifyRWCancel.Close()
 			// start with lstat to avoid race condition
 			if _, err := os.Lstat(socketPath); os.IsNotExist(err) {
 				l.connErr <- err

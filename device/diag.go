@@ -6,6 +6,7 @@
 package device
 
 import (
+	"container/list"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -40,6 +41,7 @@ type peerDiag struct {
 }
 
 type sourceStat struct {
+	recent  *list.Element
 	unknown uint64 // datagrams that are not AWG with this server's parameters
 	invalid uint64 // handshakes that do not verify
 	stale   uint64 // transport packets for an unknown or expired session
@@ -49,8 +51,9 @@ type sourceStat struct {
 }
 
 type diagSources struct {
-	mu sync.Mutex
-	m  map[netip.Addr]*sourceStat
+	mu     sync.Mutex
+	m      map[netip.Addr]*sourceStat
+	recent list.List // least recently seen at the back
 }
 
 type diagKind int
@@ -80,18 +83,14 @@ func (device *Device) diagSource(ep conn.Endpoint, kind diagKind, size int) {
 	s := d.m[addr]
 	if s == nil {
 		if len(d.m) >= diagMaxSources {
-			// forget the source that was quiet the longest
-			var oldest netip.Addr
-			var oldestT time.Time
-			for a, st := range d.m {
-				if oldestT.IsZero() || st.last.Before(oldestT) {
-					oldest, oldestT = a, st.last
-				}
-			}
-			delete(d.m, oldest)
+			oldest := d.recent.Back()
+			delete(d.m, oldest.Value.(netip.Addr))
+			d.recent.Remove(oldest)
 		}
-		s = &sourceStat{first: now}
+		s = &sourceStat{first: now, recent: d.recent.PushFront(addr)}
 		d.m[addr] = s
+	} else {
+		d.recent.MoveToFront(s.recent)
 	}
 	switch kind {
 	case diagUnknown:

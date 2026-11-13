@@ -225,7 +225,7 @@ The source table keeps at most 1024 addresses. Counters reset when the interface
 
 The amount of junk packets specified in `Jc` with a random size between `Jmin` and `Jmax` would be generated and sent prior every handshake
 
-- `Jc: int`, recommended range is 4-12
+- `Jc: int`, accepted range is 0–256, recommended range is 4–12
 - `Jmin: int` <= `Jmax:int`
 
 > [!TIP]

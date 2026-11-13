@@ -36,6 +36,8 @@ type Config struct {
 const (
 	minAddrTTL = 10 * time.Minute // how long a resolved address stays direct
 	maxAddrs   = 100_000
+	maxFlows   = 65_536
+	maxDNS     = 64
 	tcpIdle    = 30 * time.Minute
 	udpIdle    = 3 * time.Minute
 	queueLen   = 256
@@ -49,9 +51,10 @@ type Device struct {
 	domains matcher
 	stack   *direct
 
-	tunnel chan []byte // packets for the WireGuard device
-	pool   sync.Pool
-	wmu    sync.Mutex // inner.Write from the device and from the stack
+	tunnel   chan []byte // packets for the WireGuard device
+	dnsSlots chan struct{}
+	pool     sync.Pool
+	wmu      sync.Mutex // inner.Write from the device and from the stack
 
 	amu   sync.Mutex
 	addrs map[netip.Addr]time.Time // resolved direct addresses, until
@@ -97,13 +100,14 @@ func New(inner tun.Device, cfg Config) (*Device, error) {
 		return nil, err
 	}
 	d := &Device{
-		inner:   inner,
-		cfg:     cfg,
-		domains: newMatcher(cfg.Rules.Domains),
-		tunnel:  make(chan []byte, queueLen),
-		addrs:   map[netip.Addr]time.Time{},
-		flows:   map[flowKey]*flow{},
-		closed:  make(chan struct{}),
+		inner:    inner,
+		cfg:      cfg,
+		domains:  newMatcher(cfg.Rules.Domains),
+		tunnel:   make(chan []byte, queueLen),
+		dnsSlots: make(chan struct{}, maxDNS),
+		addrs:    map[netip.Addr]time.Time{},
+		flows:    map[flowKey]*flow{},
+		closed:   make(chan struct{}),
 	}
 	d.pool.New = func() any { b := make([]byte, 65535); return &b }
 	if d.stack, err = newDirect(mtu, cfg.Dial, d.writeToOS, cfg.Log); err != nil {
@@ -182,8 +186,16 @@ func (d *Device) route(pkt []byte) bool {
 	if proto == 17 && dport == 53 && len(d.domains) > 0 {
 		if q, ok := parseQuery(pkt[ihl+8:]); ok && d.domains.match(q.name) {
 			d.Stats.DirectQueries.Add(1)
-			cp := append([]byte(nil), pkt...)
-			go d.resolveDirect(cp, q)
+			select {
+			case d.dnsSlots <- struct{}{}:
+				cp := append([]byte(nil), pkt...)
+				go func() {
+					defer func() { <-d.dnsSlots }()
+					d.resolveDirect(cp, q)
+				}()
+			default:
+				// Drop excess UDP queries. The resolver can retry.
+			}
 			return false
 		}
 	}
@@ -198,6 +210,12 @@ func (d *Device) route(pkt []byte) bool {
 		// the tunnel so that connections never switch paths midway.
 		syn := proto == 6 && len(pkt) >= ihl+14 && pkt[ihl+13]&0x12 == 0x02
 		if proto == 17 || syn {
+			if len(d.flows) >= maxFlows {
+				// Drop new flows until an existing entry expires. Evicting an
+				// active flow could switch it from the tunnel to a direct route.
+				d.fmu.Unlock()
+				return false
+			}
 			f = &flow{direct: d.isDirect(dst)}
 			d.flows[key] = f
 			if f.direct {

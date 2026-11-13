@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/amnezia-vpn/amneziawg-go/v3/quicinitial"
@@ -216,12 +217,20 @@ func iPackets(sni string) ([]string, error) {
 	return out, nil
 }
 
+var wanName = regexp.MustCompile(`^[a-zA-Z0-9_.@-]{1,15}$`)
+
 func Generate(opts Options) (*Bundle, error) {
 	if opts.Endpoint == "" {
 		return nil, errors.New("endpoint is required")
 	}
 	if opts.Clients < 1 {
 		return nil, errors.New("need at least one client")
+	}
+	if strings.ContainsAny(opts.Endpoint, "\r\n") || strings.ContainsAny(opts.DNS, "\r\n") {
+		return nil, errors.New("endpoint and DNS must fit on one configuration line")
+	}
+	if opts.Port < 1 || opts.Port > 65535 {
+		return nil, errors.New("port must be between 1 and 65535")
 	}
 	if !opts.Subnet.Addr().Is4() {
 		return nil, errors.New("subnet must be IPv4")
@@ -257,7 +266,7 @@ func Generate(opts Options) (*Bundle, error) {
 	if opts.MTU < 1280 || opts.MTU > 1420 {
 		return nil, fmt.Errorf("MTU %d is out of range 1280-1420", opts.MTU)
 	}
-	if opts.WAN != "" && strings.ContainsAny(opts.WAN, " \t;&|$`'\"\\()<>") {
+	if opts.WAN != "" && !wanName.MatchString(opts.WAN) {
 		return nil, fmt.Errorf("bad WAN interface name %q", opts.WAN)
 	}
 

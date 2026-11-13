@@ -6,6 +6,24 @@ import (
 	"testing"
 )
 
+func TestRejectOversizedHandshakeAndTransportSettings(t *testing.T) {
+	dev := genTestPair(t, false)[0].dev
+	for _, tc := range [][2]string{{"jc", "2147483647"}, {"s4", "65535"}, {"i1", "<r 65535><r 1>"}} {
+		if err := dev.IpcSet(uapiCfg(tc[0], tc[1])); err == nil {
+			t.Errorf("accepted %s=%s", tc[0], tc[1])
+		}
+	}
+}
+
+func TestTruncatedDeviceConfigDoesNotRemovePeers(t *testing.T) {
+	dev := genTestPair(t, false)[0].dev
+	before := len(dev.peers.keyMap)
+	err := dev.IpcSet("replace_peers=true\ni1=" + strings.Repeat("x", 65536))
+	if err == nil || before == 0 || len(dev.peers.keyMap) != before {
+		t.Fatal("truncated configuration was applied")
+	}
+}
+
 func TestUAPIRejectsJminGreaterThanJmax(t *testing.T) {
 	pair := genTestPair(t, false)
 	dev := pair[0].dev
