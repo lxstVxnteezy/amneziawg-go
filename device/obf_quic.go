@@ -1,13 +1,15 @@
 package device
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/amnezia-vpn/amneziawg-go/v3/quicinitial"
 )
 
-// quicFlight is the <quic sni=example.com> I-packet tag: before every
+// quicFlight is the <quic sni=example.com> I-packet tag (or <quic>, with
+// no SNI, as a browser connecting to an IP address): before every
 // handshake the device builds a new QUIC Initial flight (fresh connection
 // ID, random and key shares) instead of sending the same bytes each time,
 // which is what a fixed <b 0x...> Initial does. A post-quantum ClientHello
@@ -26,12 +28,16 @@ func newQuicFlight(args []string) (*quicFlight, error) {
 		switch {
 		case strings.HasPrefix(a, "sni="):
 			q.sni = strings.TrimPrefix(a, "sni=")
+			if q.sni == "" {
+				// a generator that lost its domain; no SNI is "<quic>"
+				return nil, errors.New("empty sni= (leave it out for a ClientHello without SNI)")
+			}
 		case a == "classic":
 			q.opts.Classic = true
 		case !strings.Contains(a, "=") && q.sni == "":
 			q.sni = a
 		default:
-			return nil, fmt.Errorf("unknown argument %q (want sni=<domain>, none for no SNI, and optionally classic)", a)
+			return nil, fmt.Errorf("unknown argument %q (want sni=<domain> or nothing for no SNI, and optionally classic)", a)
 		}
 	}
 	// no sni: a ClientHello without server_name, as a browser sends to an

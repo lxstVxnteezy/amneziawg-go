@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/netip"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -390,14 +389,32 @@ func TestServerConfig(t *testing.T) {
 	}
 }
 
-func TestDefaultSNIIsFromList(t *testing.T) {
-	b, err := Generate(Options{Endpoint: "1.2.3.4", Port: 443, Clients: 1,
-		Subnet: netip.MustParsePrefix("10.66.66.0/24"), MTU: 1280, WAN: "eth0"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Contains(defaultSNIs, b.Opts.SNI) {
-		t.Fatalf("default SNI %q is not from defaultSNIs", b.Opts.SNI)
+// An IP endpoint without -sni: the I-packets carry no SNI at all, not a
+// popular site that does not resolve to the server.
+func TestNoSNIForIPEndpoint(t *testing.T) {
+	for _, fork := range []bool{false, true} {
+		b, err := Generate(Options{Endpoint: "1.2.3.4", Port: 443, Clients: 1, Fork: fork,
+			Subnet: netip.MustParsePrefix("10.66.66.0/24"), MTU: 1280, WAN: "eth0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Opts.SNI != "" || len(b.Warnings) == 0 {
+			t.Fatalf("fork=%v: SNI %q, warnings %q", fork, b.Opts.SNI, b.Warnings)
+		}
+		ipk := b.Clients[0].IPackets
+		if fork {
+			if len(ipk) != 1 || ipk[0] != "<quic>" {
+				t.Fatalf("fork: I-packets %q, want <quic>", ipk)
+			}
+			continue
+		}
+		var pkts [][]byte
+		for _, ip := range ipk {
+			pkts = append(pkts, mustHex(t, strings.TrimSuffix(strings.TrimPrefix(ip, "<b 0x"), ">")))
+		}
+		if info, err := quicinitial.Parse(pkts); err != nil || info.SNI != "" || info.ALPN != "h3" {
+			t.Fatalf("I-packets carry SNI %q ALPN %q: %v", info.SNI, info.ALPN, err)
+		}
 	}
 }
 
@@ -417,7 +434,7 @@ func TestDefaultSNIFollowsEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(b.Warnings) == 0 {
-		t.Fatal("no warning for an SNI that does not match an IP endpoint")
+		t.Fatal("no warning for an IP endpoint without a domain")
 	}
 
 	b, err = Generate(Options{Endpoint: "203.0.113.5", Port: 443, Clients: 1, SNI: "my.domain.ru",
