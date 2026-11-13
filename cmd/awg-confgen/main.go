@@ -26,7 +26,7 @@ func main() {
 	flag.StringVar(&subnet, "subnet", "10.66.66.0/24", "tunnel subnet; server takes the first address")
 	flag.StringVar(&opts.DNS, "dns", "1.1.1.1, 1.0.0.1", "DNS servers for clients")
 	flag.IntVar(&opts.MTU, "mtu", 1280, "tunnel MTU for server and clients (1280 survives mobile and tunneled links)")
-	flag.StringVar(&opts.SNI, "sni", "", "domain (or URL) put into the QUIC ClientHello of the I-packets (default: -endpoint if it is a domain, else a popular site)")
+	flag.StringVar(&opts.SNI, "sni", "", "domain (or URL) put into the QUIC ClientHello of the I-packets (default: -endpoint if it is a domain, else no SNI, like a browser connecting to an IP)")
 	flag.StringVar(&opts.WAN, "wan", "", "server uplink interface used for NAT (default: detected from the default route)")
 	flag.BoolVar(&opts.DisableCookies, "disable-cookies", false, "turn off the cookie mechanism (no handshake flood protection)")
 	flag.BoolVar(&opts.Fork, "fork", false, "clients run this fork: I1 = <quic sni=...>, a new QUIC Initial before every handshake (official clients reject it)")
@@ -59,7 +59,11 @@ func main() {
 	for _, c := range b.Clients {
 		write(filepath.Join("clients", c.Name+".conf"), b.ClientConfig(c))
 	}
-	fmt.Printf("QUIC disguise SNI: %s\n", b.Opts.SNI)
+	if b.Opts.SNI != "" {
+		fmt.Printf("QUIC disguise SNI: %s\n", b.Opts.SNI)
+	} else {
+		fmt.Println("QUIC disguise SNI: none (IP endpoint)")
+	}
 	for _, w := range b.Warnings {
 		fmt.Fprintln(os.Stderr, "warning:", w)
 	}

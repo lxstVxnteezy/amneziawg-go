@@ -170,6 +170,36 @@ func TestClassicFitsOneDatagram(t *testing.T) {
 	}
 }
 
+// No SNI: the ClientHello a browser sends to an IP address. Everything
+// else, ALPN h3 and the GREASE wrapping included, stays Chrome's.
+func TestFlightWithoutSNI(t *testing.T) {
+	for _, classic := range []bool{false, true} {
+		pkts, err := Flight("", Options{Classic: classic})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := map[bool]int{false: 2, true: 1}[classic]; len(pkts) != want {
+			t.Fatalf("classic=%v: %d Initials, want %d", classic, len(pkts), want)
+		}
+		hello := clientHelloFromInitials(t, pkts)
+		if sni, alpn := sniFromClientHello(t, hello); sni != "" || alpn != "h3" {
+			t.Errorf("classic=%v: sni=%q alpn=%q", classic, sni, alpn)
+		}
+		exts := extensionTypes(t, hello)
+		if slices.Contains(exts, 0x0000) {
+			t.Errorf("classic=%v: server_name extension present", classic)
+		}
+		for _, want := range []uint16{0x0033, 0x0039, 0x001b, 0x44cd} {
+			if !slices.Contains(exts, want) {
+				t.Errorf("classic=%v: extension %#04x missing", classic, want)
+			}
+		}
+		if !isGrease(exts[0]) || !isGrease(exts[len(exts)-1]) {
+			t.Errorf("classic=%v: not wrapped in GREASE extensions", classic)
+		}
+	}
+}
+
 // Every flight is a new connection attempt: nothing repeats.
 func TestFlightsDiffer(t *testing.T) {
 	a, err := Flight("vk.com", Options{})

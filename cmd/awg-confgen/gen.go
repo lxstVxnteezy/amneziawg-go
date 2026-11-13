@@ -82,12 +82,6 @@ const (
 	persistentKeepalive  = "20-30"
 )
 
-var defaultSNIs = []string{
-	"www.google.com",
-	"yandex.ru",
-	"vk.com",
-}
-
 // normalizeSNI accepts a bare domain or a URL ("http://yandex.ru/") and
 // returns the host name to put into the ClientHello.
 func normalizeSNI(s string) (string, error) {
@@ -241,22 +235,24 @@ func Generate(opts Options) (*Bundle, error) {
 	if opts.SNI == "" {
 		// A ClientHello for a domain that resolves to the server is
 		// consistent: a DPI comparing SNI with the destination IP sees
-		// nothing odd. A popular site on a VPS address is easy to flag.
+		// nothing odd. Without a domain the Initials carry no SNI at all,
+		// as a browser connecting to an IP address does: a popular site on
+		// a VPS address (the old fallback) is what gets flagged.
 		if host, err := normalizeSNI(opts.Endpoint); err == nil {
 			opts.SNI = host
 		} else {
-			opts.SNI = defaultSNIs[randInt(0, len(defaultSNIs)-1)]
-			warnings = append(warnings, fmt.Sprintf(
-				"-endpoint is not a domain name, so the SNI is %s, which does not resolve to the server; "+
-					"a DPI comparing SNI with the destination IP can flag it. "+
-					"Point a domain of yours at the server and pass it as -endpoint or -sni.", opts.SNI))
+			warnings = append(warnings, "-endpoint is not a domain name, so the I-packets carry no SNI, "+
+				"like a browser connecting to an IP address. A domain of yours pointed at the server is better: "+
+				"pass it as -endpoint or -sni.")
 		}
 	}
-	sni, err := normalizeSNI(opts.SNI)
-	if err != nil {
-		return nil, err
+	if opts.SNI != "" {
+		sni, err := normalizeSNI(opts.SNI)
+		if err != nil {
+			return nil, err
+		}
+		opts.SNI = sni
 	}
-	opts.SNI = sni
 
 	if opts.MTU < 1280 || opts.MTU > 1420 {
 		return nil, fmt.Errorf("MTU %d is out of range 1280-1420", opts.MTU)
@@ -275,8 +271,12 @@ func Generate(opts Options) (*Bundle, error) {
 	addr := b.Address
 	for i := range opts.Clients {
 		addr = addr.Next()
-		ipk := []string{"<quic sni=" + opts.SNI + ">"}
+		ipk := []string{"<quic>"}
+		if opts.SNI != "" {
+			ipk = []string{"<quic sni=" + opts.SNI + ">"}
+		}
 		if !opts.Fork {
+			var err error
 			if ipk, err = iPackets(opts.SNI); err != nil {
 				return nil, err
 			}

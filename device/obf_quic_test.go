@@ -31,8 +31,22 @@ func TestQuicTag(t *testing.T) {
 			t.Fatalf("%s: the same flight twice", spec)
 		}
 	}
+	// no sni: a ClientHello without server_name, like a browser to an IP
+	for spec, want := range map[string]int{"<quic>": 2, "<quic classic>": 1} {
+		c, err := newObfChain(spec)
+		if err != nil {
+			t.Fatalf("%s: %v", spec, err)
+		}
+		a, err := c.Datagrams()
+		if err != nil || len(a) != want {
+			t.Fatalf("%s: %d datagrams, %v", spec, len(a), err)
+		}
+		if info, err := quicinitial.Parse(a); err != nil || info.SNI != "" || info.ALPN != "h3" {
+			t.Fatalf("%s: SNI %q ALPN %q, %v", spec, info.SNI, info.ALPN, err)
+		}
+	}
 	for _, bad := range []string{
-		"<quic>",
+		"<quic sni=>",
 		"<quic sni=1.2.3.4>",
 		"<quic sni=localhost>",
 		"<quic sni=vk.com pq=off>",
