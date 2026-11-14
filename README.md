@@ -232,6 +232,20 @@ printf 'get=1\n\n' | nc -U -q1 /var/run/amneziawg/awg0.sock | grep ^diag_
 
 The source table keeps at most 1024 addresses. Counters reset when the interface restarts.
 
+### QUIC shape of packets [both sides, this fork, automatic]
+
+A flow that begins with a QUIC Initial has to go on looking like QUIC. In AmneziaWG the first byte of every later packet comes from the random S1-S4 prefix (or is random junk), so half of them read as QUIC long headers with a random version, which no QUIC endpoint sends. A DPI that follows the flow as QUIC sees through the disguise at the first such packet.
+
+When the disguise is QUIC, the fork makes the first byte of junk, handshake, cookie and transport packets a QUIC short header byte (`0b01xxxxxx`: short header, fixed bit set). It turns on by itself when:
+
+- an I-packet is a QUIC Initial: the `<quic>` tag or a fixed `<b 0x...>` Initial (client);
+- non-AWG datagrams go to a fallback site (server);
+- the device listens on UDP 443 (server).
+
+Nothing else changes on the wire and the receiver never reads these bits, so a shaping side works with any peer, official or fork. With an S prefix of 0 (AWG 1.x levels) there is nothing to shape. Two of the 96 bits of the header protection nonce become fixed; 94 stay random.
+
+This removes the cheapest tell, not every one: the server still does not answer the Initial the way an HTTP/3 server would, and a stateful parser can notice that.
+
 ### Junk packets
 
 The amount of junk packets specified in `Jc` with a random size between `Jmin` and `Jmax` would be generated and sent prior every handshake

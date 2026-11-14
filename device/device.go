@@ -142,6 +142,10 @@ type Device struct {
 	// fallback relays non-AWG datagrams to a real server (see fallback.go)
 	fallback fallback
 
+	// quicShape makes outgoing packets start like QUIC short headers (see
+	// quicshape.go)
+	quicShape atomic.Bool
+
 	// diag counts non-AWG and invalid datagrams per source (see diag.go)
 	diag diagSources
 }
