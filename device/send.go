@@ -138,19 +138,25 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 
 	var sendBuffer [][]byte
 
-	for i := range peer.device.ipackets {
-		if ipacket := peer.device.ipackets[i].Load(); ipacket != nil {
-			bufs, err := ipacket.Datagrams()
-			if err != nil {
-				// the handshake still goes out, without this disguise
-				peer.device.log.Errorf("%v - Failed to build I%d: %v", peer, i+1, err)
-				continue
+	// I-packets and junk open a flow; a rekey inside a live one goes out
+	// bare (see flowstart.go)
+	if peer.startsFlow(time.Now()) {
+		for i := range peer.device.ipackets {
+			if ipacket := peer.device.ipackets[i].Load(); ipacket != nil {
+				bufs, err := ipacket.Datagrams()
+				if err != nil {
+					// the handshake still goes out, without this disguise
+					peer.device.log.Errorf("%v - Failed to build I%d: %v", peer, i+1, err)
+					continue
+				}
+				sendBuffer = append(sendBuffer, bufs...)
 			}
-			sendBuffer = append(sendBuffer, bufs...)
 		}
-	}
 
-	sendBuffer = append(sendBuffer, peer.device.JunkPackets()...)
+		sendBuffer = append(sendBuffer, peer.device.JunkPackets()...)
+	} else {
+		peer.device.log.Verbosef("%v - Rekey inside a live flow: no I-packets or junk", peer)
+	}
 
 	padding := int(peer.device.paddings.init.Load())
 	trailerLen := max(peer.randomTrailer(padding+MessageInitiationSize), 0)

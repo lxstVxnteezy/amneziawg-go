@@ -84,7 +84,7 @@ Pick the SNI so that it resolves to the server: a DPI can compare the SNI of a Q
 
 Known limitations:
 
-- Without `-fork`, I-packets are fixed bytes, so the same client sends the same Initial before every handshake (every few minutes). A DPI that remembers Initials can notice the repeats. With `-fork` the client builds a new one each time (see "Generated QUIC Initials").
+- Without `-fork`, I-packets are fixed bytes, so the same client sends the same Initial at the start of every flow (each port rotation or reconnect). A DPI that remembers Initials can notice the repeats. With `-fork` the client builds a new one each time (see "Generated QUIC Initials").
 - After the Initial, the traffic on the same flow does not look like QUIC: with header protection the first byte is random, so about half the packets break the QUIC short-header fixed bit.
 - Clients route `::/0` into the tunnel but the server has no IPv6. IPv6 is blackholed on purpose so it does not leak past the tunnel.
 
@@ -248,7 +248,7 @@ This removes the cheapest tell, not every one: the server still does not answer 
 
 ### Junk packets
 
-The amount of junk packets specified in `Jc` with a random size between `Jmin` and `Jmax` would be generated and sent prior every handshake
+The amount of junk packets specified in `Jc` with a random size between `Jmin` and `Jmax` would be generated and sent prior every handshake that starts a flow (see "Only at the start of a flow")
 
 - `Jc: int`, accepted range is 0–256, recommended range is 4–12
 - `Jmin: int` <= `Jmax:int`
@@ -283,7 +283,7 @@ Values could be specified as:
 
 ### Custom signature packets
 
-These packets are being send prior to every handshake, in the same way as Junk packets do. The sending order is `I1`, `I2`, `I3`, `I4`, `I5`. If there is no value specified, the packet is skipped.
+These packets are being send prior to every handshake that starts a flow, in the same way as Junk packets do. The sending order is `I1`, `I2`, `I3`, `I4`, `I5`. If there is no value specified, the packet is skipped.
 
 - `I1: string`
 - `I2: string`
@@ -301,6 +301,16 @@ Value is a sequence of tags specified below:
 
 `<r>`, `<rc>`, `<rd>` and `<dz>` take a size from 0 to 65535; this fork rejects anything else when the config is applied (a negative size used to crash the device at the first handshake). The tags of one I-packet together must not exceed 65535 bytes either: `<r 65535><r 1>` is rejected.
 
+#### Only at the start of a flow [this fork]
+
+A real QUIC client sends its Initial once, when a connection starts, and never again on the same 4-tuple. Upstream sends I1-I5 and junk with every handshake: every two minutes and on every retry, in the middle of a running flow, which no browser does. This fork sends them only with a handshake that starts a flow:
+
+- the local socket is new (startup, rebind, `port_rotation`) or the peer's address changed;
+- the peer has not answered since the last disguised handshake (the flow never got going);
+- nothing went either way for 30 s (Chrome's QUIC idle timeout; NATs and middleboxes may have forgotten the flow).
+
+Any other handshake is a rekey inside a live flow and goes out bare, like the rest of the flow (QUIC-shaped when the shape is on). Only the sending side changes: receivers skip I-packets and junk and never require them, so this works with official servers and clients. With `port_rotation` every rotation starts a new flow, so each flow begins with its own Initial.
+
 I1-I5 can be changed on a running device without a data race: each of them is replaced atomically. They are replaced one by one, so a handshake sent during the change may carry some old and some new I-packets; the next one has only the new set.
 
 #### Generated QUIC Initials [client-side, this fork]
@@ -311,7 +321,7 @@ I1 = <quic sni=vpn.example.com classic>
 I1 = <quic>
 ```
 
-Before every handshake the device builds a new QUIC v1 client Initial flight: a fresh connection ID, TLS random and key shares, a Chrome-like ClientHello (GREASE, shuffled extensions, X25519MLKEM768) for the domain, encrypted with the Initial keys of that connection ID as RFC 9001 requires. A post-quantum ClientHello does not fit one datagram, so the flight is two datagrams, like Chrome's; `classic` drops the post-quantum key share (older Chrome) and fits one. A fixed `<b 0x...>` Initial resends the same bytes, connection ID included, before every handshake, which a DPI that remembers Initials can notice; this one is a new connection attempt every time.
+Before every handshake that starts a flow the device builds a new QUIC v1 client Initial flight: a fresh connection ID, TLS random and key shares, a Chrome-like ClientHello (GREASE, shuffled extensions, X25519MLKEM768) for the domain, encrypted with the Initial keys of that connection ID as RFC 9001 requires. A post-quantum ClientHello does not fit one datagram, so the flight is two datagrams, like Chrome's; `classic` drops the post-quantum key share (older Chrome) and fits one. A fixed `<b 0x...>` Initial resends the same bytes, connection ID included, before every handshake, which a DPI that remembers Initials can notice; this one is a new connection attempt every time.
 
 - The tag must be the only one of its I-packet. Other I-packets may follow it.
 - Only the sending side needs this fork: the server never parses I-packets (it drops them, or relays them to the fallback site when one is set). amneziawg-tools passes the value through unchanged, so it works with `awg-quick` too. Official AmneziaWG clients reject the tag, so use it only in configs for clients on this fork.

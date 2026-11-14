@@ -46,6 +46,7 @@ type Device struct {
 		portExplicit  bool   // listen_port was set to a non-zero value: never rotate it
 		fwmark        uint32 // mark value (0 = disabled)
 		brokenRoaming bool
+		gen           atomic.Uint64 // bumped on every successful BindUpdate (see flowstart.go)
 	}
 
 	staticIdentity struct {
@@ -568,6 +569,7 @@ func (device *Device) BindUpdate() error {
 		netc.port = 0
 		return err
 	}
+	netc.gen.Add(1) // a new socket: whatever goes out next starts a new flow
 
 	netc.netlinkCancel, err = device.startRouteListener(netc.bind)
 	if err != nil {

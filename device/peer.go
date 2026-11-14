@@ -25,6 +25,7 @@ type Peer struct {
 	txBytes           atomic.Uint64  // bytes send to peer (endpoint)
 	rxBytes           atomic.Uint64  // bytes received from peer
 	lastHandshakeNano atomic.Int64   // nano seconds since epoch
+	flow              peerFlow       // see flowstart.go
 
 	endpoint struct {
 		sync.Mutex
@@ -145,6 +146,7 @@ func (peer *Peer) SendBuffers(buffers [][]byte) error {
 			totalLen += uint64(len(b))
 		}
 		peer.txBytes.Add(totalLen)
+		peer.flow.lastSent.Store(time.Now().UnixNano())
 	}
 	return err
 }
