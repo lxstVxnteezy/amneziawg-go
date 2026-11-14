@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net/netip"
+	"strings"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -18,11 +19,14 @@ type query struct {
 func parseQuery(b []byte) (query, bool) {
 	var p dnsmessage.Parser
 	h, err := p.Start(b)
-	if err != nil || h.Response {
+	if err != nil || h.Response || h.OpCode != 0 {
 		return query{}, false
 	}
 	q, err := p.Question()
-	if err != nil {
+	if err != nil || q.Class != dnsmessage.ClassINET {
+		return query{}, false
+	}
+	if _, err := p.Question(); err != dnsmessage.ErrSectionDone {
 		return query{}, false
 	}
 	return query{name: q.Name.String(), qtype: q.Type}, true
@@ -78,34 +82,49 @@ func (d *Device) exchange(q []byte) (resp []byte, addrs []netip.Addr, ttl time.D
 		if n < 2 || buf[0] != q[0] || buf[1] != q[1] {
 			continue // not the answer to this query
 		}
-		resp = buf[:n]
-		break
-	}
-	var p dnsmessage.Parser
-	if _, err := p.Start(resp); err != nil {
-		return resp, nil, 0
-	}
-	p.SkipAllQuestions()
-	ttl = time.Hour
-	for {
-		h, err := p.AnswerHeader()
-		if err != nil {
-			break
-		}
-		if h.Type == dnsmessage.TypeA {
-			a, err := p.AResource()
-			if err != nil {
-				break
-			}
-			addrs = append(addrs, netip.AddrFrom4(a.A))
-			ttl = min(ttl, time.Duration(h.TTL)*time.Second)
+		reply := buf[:n]
+		var msg dnsmessage.Message
+		want, ok := parseQuery(q)
+		if !ok || msg.Unpack(reply) != nil || !msg.Response || msg.OpCode != 0 || len(msg.Questions) != 1 {
 			continue
 		}
-		if err := p.SkipAnswer(); err != nil {
-			break
+		got := msg.Questions[0]
+		if !strings.EqualFold(got.Name.String(), want.name) || got.Type != want.qtype || got.Class != dnsmessage.ClassINET {
+			continue
+		}
+		if msg.Truncated || msg.RCode != dnsmessage.RCodeSuccess || want.qtype != dnsmessage.TypeA {
+			return reply, nil, 0
+		}
+		addrs, ttl := directAddresses(&msg, want.name)
+		return reply, addrs, ttl
+	}
+}
+
+// Only the queried name and its CNAME chain may authorize a direct route.
+func directAddresses(msg *dnsmessage.Message, name string) ([]netip.Addr, time.Duration) {
+	aliases := make(map[string]string)
+	for _, rr := range msg.Answers {
+		if cn, ok := rr.Body.(*dnsmessage.CNAMEResource); ok && rr.Header.Class == dnsmessage.ClassINET {
+			aliases[strings.ToLower(rr.Header.Name.String())] = strings.ToLower(cn.CNAME.String())
 		}
 	}
-	return resp, addrs, ttl
+	name = strings.ToLower(name)
+	for i := 0; aliases[name] != ""; i++ {
+		if i >= len(aliases) {
+			return nil, 0
+		}
+		name = aliases[name]
+	}
+	var addrs []netip.Addr
+	ttl := time.Hour
+	for _, rr := range msg.Answers {
+		a, ok := rr.Body.(*dnsmessage.AResource)
+		if ok && rr.Header.Class == dnsmessage.ClassINET && strings.EqualFold(rr.Header.Name.String(), name) {
+			addrs = append(addrs, netip.AddrFrom4(a.A))
+			ttl = min(ttl, time.Duration(rr.Header.TTL)*time.Second)
+		}
+	}
+	return addrs, ttl
 }
 
 // emptyAnswer turns a query into a "no records" answer.

@@ -26,6 +26,29 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 )
 
+func TestRouteAtCapacity(t *testing.T) {
+	d := &Device{flows: make(map[flowKey]*flow), domains: newMatcher([]string{"example.org"}), dnsSlots: make(chan struct{}, 1)}
+	pkt := make([]byte, 28)
+	pkt[0], pkt[9] = 0x45, 17
+	binary.BigEndian.PutUint16(pkt[22:], 53)
+	d.dnsSlots <- struct{}{}
+	if d.route(append(pkt, dnsQuery(t, "example.org.", dnsmessage.TypeA)...)) || d.Stats.DirectQueries.Load() != 1 {
+		t.Fatal("excess direct DNS query escaped into the tunnel")
+	}
+	addr := netip.MustParseAddr("0.0.0.0")
+	for i := 0; i < maxFlows; i++ {
+		d.flows[flowKey{proto: 17, src: netip.AddrPortFrom(addr, uint16(i)), dst: netip.AddrPortFrom(addr, 443)}] = &flow{}
+	}
+	binary.BigEndian.PutUint16(pkt[22:], 80)
+	if d.route(pkt) || len(d.flows) != maxFlows {
+		t.Fatal("admitted a new flow at capacity")
+	}
+	binary.BigEndian.PutUint16(pkt[22:], 443)
+	if !d.route(pkt) {
+		t.Fatal("dropped existing tunnel flow at capacity")
+	}
+}
+
 func TestRules(t *testing.T) {
 	r, err := ParseRules("preset:ru, Gosuslugi.RU., рф, *.example.org", "198.51.100.0/24 203.0.113.7", "8.8.8.8")
 	if err != nil {
@@ -190,6 +213,7 @@ func newWorld(t *testing.T) *world {
 			b.Question(q)
 			b.StartAnswers()
 			b.AResource(dnsmessage.ResourceHeader{Name: q.Name, Class: dnsmessage.ClassINET, TTL: 60}, dnsmessage.AResource{A: [4]byte{198, 51, 100, 8}})
+			b.AResource(dnsmessage.ResourceHeader{Name: dnsmessage.MustNewName("unrelated.example."), Class: dnsmessage.ClassINET, TTL: 60}, dnsmessage.AResource{A: [4]byte{203, 0, 113, 9}})
 			out, _ := b.Finish()
 			dc.WriteTo(out, a)
 		}
@@ -365,6 +389,9 @@ func TestDomainGoesDirect(t *testing.T) {
 	}
 	echoTCP(t, c)
 
+	// An unrelated A in the same response must not open a direct route.
+	go r.phone.dialTCP(t, "203.0.113.9:443", 2*time.Second)
+	r.toTunnel(t, netip.MustParseAddrPort("203.0.113.9:443"))
 	// AAAA for a direct name: answered empty, so apps use IPv4
 	u.Write(dnsQuery(t, "gosuslugi.ru.", dnsmessage.TypeAAAA))
 	n, err = u.Read(buf)

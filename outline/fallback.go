@@ -2,6 +2,7 @@ package outline
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -55,13 +56,18 @@ func mapYamlToConfig(y smart.YAMLNode) (*DeviceConfig, error) {
 
 	var cfg DeviceConfig
 	if err = yaml.Unmarshal(bytes, &cfg); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal yaml: %v", err)
+		return nil, fmt.Errorf("invalid AWG fallback configuration")
 	}
 
 	return &cfg, nil
 }
 
 func genIpcString(cfg *DeviceConfig) (string, error) {
+	for _, value := range []string{cfg.H1, cfg.H2, cfg.H3, cfg.H4, cfg.I1, cfg.I2, cfg.I3, cfg.I4, cfg.I5} {
+		if strings.ContainsAny(value, "\r\n") {
+			return "", fmt.Errorf("multiline obfuscation parameter")
+		}
+	}
 	privateKeyBytes, err := base64.StdEncoding.DecodeString(cfg.PrivateKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode private key: %v", err)
@@ -138,6 +144,9 @@ func genIpcString(cfg *DeviceConfig) (string, error) {
 	}
 
 	for _, peer := range cfg.Peers {
+		if strings.ContainsAny(peer.Endpoint, "\r\n") {
+			return "", fmt.Errorf("multiline peer endpoint")
+		}
 		publicKeyBytes, err := base64.StdEncoding.DecodeString(peer.PublicKey)
 		if err != nil {
 			return "", fmt.Errorf("failed to decode public key: %v", err)
@@ -150,6 +159,9 @@ func genIpcString(cfg *DeviceConfig) (string, error) {
 		b.WriteString(peer.Endpoint)
 
 		for _, allowedIp := range peer.AllowedIPs {
+			if strings.ContainsAny(allowedIp, "\r\n") {
+				return "", fmt.Errorf("multiline peer allowed IP prefix")
+			}
 			b.WriteString("\nallowed_ip=")
 			b.WriteString(allowedIp)
 		}
@@ -181,7 +193,7 @@ func FallbackParser(ctx context.Context, y smart.YAMLNode) (transport.StreamDial
 
 	ipc, err := genIpcString(cfg)
 	if err != nil {
-		return nil, "", fmt.Errorf("faield to generate ipc config: %v", err)
+		return nil, "", fmt.Errorf("failed to generate ipc config: %w", err)
 	}
 
 	var prefixes []netip.Prefix
@@ -216,7 +228,9 @@ func FallbackParser(ctx context.Context, y smart.YAMLNode) (transport.StreamDial
 		return nil, "", fmt.Errorf("failed to create dialer: %v", err)
 	}
 
-	return dialer, ipc, nil
+	// Outline prints the strategy signature when testing fallback dialers.
+	digest := sha256.Sum256([]byte(ipc))
+	return dialer, hex.EncodeToString(digest[:]), nil
 }
 
 func RegisterFallbackParser(opt *mobileproxy.SmartDialerOptions, name string) {

@@ -151,7 +151,8 @@ func (config *DialConfig) DialTimeout(path string, timeout time.Duration) (net.C
 		timeout = time.Second * 2
 	}
 	absTimeout := time.Now().Add(timeout)
-	ctx, _ := context.WithDeadline(context.Background(), absTimeout)
+	ctx, cancel := context.WithDeadline(context.Background(), absTimeout)
+	defer cancel()
 	conn, err := config.DialContext(ctx, path)
 	if err == context.DeadlineExceeded {
 		return nil, os.ErrDeadlineExceeded

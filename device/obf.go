@@ -52,6 +52,7 @@ type obfChain struct {
 func newObfChain(spec string) (*obfChain, error) {
 	var (
 		obfs []obf
+		size int
 		quic *quicFlight
 		errs []error
 	)
@@ -108,6 +109,11 @@ func newObfChain(spec string) (*obfChain, error) {
 			continue
 		}
 
+		n := o.ObfuscatedLen(0)
+		if n > maxObfLen-size {
+			return nil, fmt.Errorf("I-packet exceeds %d bytes", maxObfLen)
+		}
+		size += n
 		obfs = append(obfs, o)
 		remaining = remaining[end+1:]
 	}

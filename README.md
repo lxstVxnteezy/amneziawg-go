@@ -43,13 +43,15 @@ This runs on Windows, you should use it from [amneziawg-windows](https://github.
 
 ## Building
 
-This requires an installation of the latest version of [Go](https://go.dev/).
+This requires [Go](https://go.dev/) 1.26.11 or newer (the version in `go.mod`; the Dockerfile builds with it as well).
 
 ```
-$ git clone https://github.com/amnezia-vpn/amneziawg-go
+$ git clone https://github.com/lxstVxnteezy/amneziawg-go
 $ cd amneziawg-go
 $ make
 ```
+
+Upstream is [amnezia-vpn/amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go); the module path is unchanged, so other projects pin this fork with a `replace` directive.
 
 ## Config generator (awg-confgen)
 
@@ -74,6 +76,8 @@ It writes `awg-configs/server/awg0.conf` and `awg-configs/clients/clientN.conf`.
 | `-dns` | `1.1.1.1, 1.0.0.1` | DNS servers for clients |
 | `-fork` | off | clients run this fork: `I1 = <quic sni=...>` (or `<quic>` without SNI), a new QUIC Initial before every handshake instead of fixed bytes (official clients reject it) |
 
+The configs are written with mode 0600 through a temporary file and a rename, so a rerun replaces old configs atomically and also tightens files that had broader permissions. The generator refuses an endpoint or DNS value with a line break, a port outside 1-65535 and a `-wan` that is not a plain interface name (`[a-zA-Z0-9_.@-]`, up to 15 characters), because those values end up in the config and in the server's PostUp/PostDown commands.
+
 Each client gets its own I-packets: a real QUIC v1 Initial carrying a Chrome-like TLS ClientHello (GREASE, X25519MLKEM768, shuffled extensions), split across I1 and I2 the way Chrome splits it. The server config has no I-packets, because they are client Initials and the receiving side ignores them anyway.
 
 Pick the SNI so that it resolves to the server: a DPI can compare the SNI of a QUIC Initial with the destination IP, and `www.google.com` on a VPS address is easy to flag. Point a domain of yours at the server and pass it as `-endpoint` (it becomes the SNI) or as `-sni`. With an IP endpoint and no `-sni` the I-packets carry no SNI at all, as a browser connecting to an IP address does (TLS does not allow an IP in SNI), and the generator prints a warning. A borrowed popular domain is worse than none: it does not resolve to the server.
@@ -85,6 +89,10 @@ Known limitations:
 - Clients route `::/0` into the tunnel but the server has no IPv6. IPv6 is blackholed on purpose so it does not leak past the tunnel.
 
 ## Configuration
+
+### Applying a configuration [this fork]
+
+A UAPI `set` is applied as a whole or not at all. Input that cannot be read to the end (a line longer than the reader buffer, a lost connection) or a line without `key=value` is rejected before anything changes, so a truncated config with `replace_peers=true` cannot remove the peers. The Outline integration (`outline/`) also rejects H1-H4, I1-I5, endpoints and AllowedIPs containing a line break, because such a value would add UAPI commands of its own.
 
 ### Data types and definitions
 
@@ -202,6 +210,9 @@ Package `splittun` wraps the client's TUN and sends chosen sites past the tunnel
 - Everything else, other DNS queries included, goes into the tunnel unchanged. A flow keeps its path for its whole life: a connection that started in the tunnel is not moved when its address becomes direct.
 - `ParseRules("preset:ru, example.org", "198.51.100.0/24", "77.88.8.8")`; `preset:ru` is the Russian zones (.ru, .su, .рф, .москва) and big Russian services on other zones (VK, Yandex, ...).
 
+- Only A records of the queried name and of its CNAME chain make an address direct; the answer must match the query (name, type, class IN), and anything else in it is ignored. Truncated or failed answers are passed on without adding routes.
+- At most 64 direct lookups run at once; extra queries are dropped and the resolver retries them. At most 65536 flows are tracked: new flows are dropped until an entry expires, and active flows are never evicted, so none of them moves to the other path. A direct TCP connection keeps its entry for as long as its relay is alive, even if it is silent for a long time.
+
 The direct connections are made by the process itself, so it must not route into its own tunnel: on Android the VPN excludes the app (`addDisallowedApplication`).
 
 Encrypted DNS would hide the queries: Android's automatic Private DNS tries DNS over TLS to the tunnel's resolver, and Chrome's automatic secure DNS upgrades 1.1.1.1 to DNS over HTTPS. Pass the tunnel's DNS servers as `Config.Resolvers`: TCP to them on 853 and 443 is answered with a reset and UDP on those ports is dropped, so both fall back to plain DNS. Private DNS set to a specific hostname, and apps with their own DoH server, still bypass the interception; their traffic to listed sites goes through the tunnel.
@@ -239,7 +250,7 @@ This removes the cheapest tell, not every one: the server still does not answer 
 
 The amount of junk packets specified in `Jc` with a random size between `Jmin` and `Jmax` would be generated and sent prior every handshake
 
-- `Jc: int`, recommended range is 4-12
+- `Jc: int`, accepted range is 0–256, recommended range is 4–12
 - `Jmin: int` <= `Jmax:int`
 
 > [!TIP]
@@ -254,6 +265,8 @@ The amount of junk packets specified in `Jc` with a random size between `Jmin` a
 - `S2: int` - padding of handshake response message
 - `S3: int` - padding of handshake cookie message
 - `S4: int` - padding of transport messages
+
+This fork rejects an `S4` larger than the transport buffer can carry (65535 minus the 32-byte transport header and tag on Linux, macOS and Android; less on Windows and iOS, whose buffers are smaller).
 
 ### Message headers
 
@@ -286,7 +299,9 @@ Value is a sequence of tags specified below:
 - `<t>` - timestamp tag. Dumps 4-bytes long current system time in UNIX format
 - `<quic sni=[domain]>`, `<quic>` - generated QUIC Initial flight, with or without SNI [client-side, this fork]. See below
 
-`<r>`, `<rc>`, `<rd>` and `<dz>` take a size from 0 to 65535; this fork rejects anything else when the config is applied (a negative size used to crash the device at the first handshake).
+`<r>`, `<rc>`, `<rd>` and `<dz>` take a size from 0 to 65535; this fork rejects anything else when the config is applied (a negative size used to crash the device at the first handshake). The tags of one I-packet together must not exceed 65535 bytes either: `<r 65535><r 1>` is rejected.
+
+I1-I5 can be changed on a running device without a data race: each of them is replaced atomically. They are replaced one by one, so a handshake sent during the change may carry some old and some new I-packets; the next one has only the new set.
 
 #### Generated QUIC Initials [client-side, this fork]
 

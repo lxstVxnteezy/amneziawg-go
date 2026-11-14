@@ -40,10 +40,12 @@ func NewStreamDialer(opts DialerOptions) (*StreamDialer, error) {
 
 	dev := device.NewDevice(tun, conn.NewDefaultBind(), &awgLogger)
 	if err := dev.IpcSet(opts.Ipc); err != nil {
+		dev.Close()
 		return nil, fmt.Errorf("failed to configure device: %v", err)
 	}
 
 	if err := dev.Up(); err != nil {
+		dev.Close()
 		return nil, fmt.Errorf("failed to start awg device: %v", err)
 	}
 
