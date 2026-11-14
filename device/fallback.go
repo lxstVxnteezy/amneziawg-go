@@ -59,6 +59,7 @@ func (device *Device) SetFallback(target netip.AddrPort) {
 		f.target.Store(nil)
 	}
 	f.closeAll()
+	device.updateQUICShape()
 }
 
 func (device *Device) fallbackTarget() (netip.AddrPort, bool) {

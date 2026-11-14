@@ -1035,5 +1035,7 @@ func (d *ipcSetDevice) mergeWithDevice(device *Device) *IPCError {
 		device.headerProtection.active.Store(&key)
 	}
 
+	// I-packets, fallback and the listen port were applied above
+	device.updateQUICShape()
 	return nil
 }

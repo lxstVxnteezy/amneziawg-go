@@ -642,6 +642,9 @@ func (device *Device) JunkPackets() [][]byte {
 	for range device.junk.count.Load() {
 		buf := make([]byte, min+fastrandn(max-min))
 		rand.Read(buf)
+		if device.quicShape.Load() {
+			shapeQUIC(buf)
+		}
 		bufs = append(bufs, buf)
 	}
 

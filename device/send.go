@@ -159,6 +159,9 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 
 	crypt := buf[:padding]
 	rand.Read(crypt)
+	if peer.device.quicShape.Load() {
+		shapeQUIC(crypt) // before the header cipher takes its nonce from crypt
+	}
 
 	writer := bytes.NewBuffer(buf[padding:padding])
 	binary.Write(writer, binary.LittleEndian, msg)
@@ -209,6 +212,9 @@ func (peer *Peer) SendHandshakeResponse() error {
 
 	crypt := buf[:padding]
 	rand.Read(crypt)
+	if peer.device.quicShape.Load() {
+		shapeQUIC(crypt) // before the header cipher takes its nonce from crypt
+	}
 
 	writer := bytes.NewBuffer(buf[padding:padding])
 	binary.Write(writer, binary.LittleEndian, response)
@@ -268,6 +274,9 @@ func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement)
 
 	crypt := buf[:padding]
 	rand.Read(crypt)
+	if device.quicShape.Load() {
+		shapeQUIC(crypt) // before the header cipher takes its nonce from crypt
+	}
 
 	writer := bytes.NewBuffer(buf[padding:padding])
 	binary.Write(writer, binary.LittleEndian, reply)
@@ -627,6 +636,9 @@ func (device *Device) RoutineEncryption(id int) {
 			// fill crypto padding
 			crypt := elem.buffer[:elem.padding]
 			prng.Read(crypt)
+			if device.quicShape.Load() {
+				shapeQUIC(crypt) // before the header cipher takes its nonce from crypt
+			}
 
 			// populate header fields
 			header := elem.buffer[elem.padding : elem.padding+MessageTransportHeaderSize]
