@@ -311,6 +311,11 @@ A real QUIC client sends its Initial once, when a connection starts, and never a
 
 Any other handshake is a rekey inside a live flow and goes out bare, like the rest of the flow (QUIC-shaped when the shape is on). Only the sending side changes: receivers skip I-packets and junk and never require them, so this works with official servers and clients. With `port_rotation` every rotation starts a new flow, so each flow begins with its own Initial.
 
+With a QUIC disguise (the shape is on and there are I-packets) two more things follow a browser:
+
+- **Retries are QUIC retransmissions.** When the handshake gets no answer, a browser does not start a new connection every 5 s: it resends the same ClientHello under the same connection ID, in packets with the next packet numbers, when its probe timeout fires (1, 2, 4, 8 s). Handshake retries follow that schedule: sends at 0, 1, 3, 7 s, then a new attempt with a new connection ID at 15 s. A `<quic>` tag is retransmitted properly; fixed bytes (`<b 0x...>`) repeat as they are. The device gives up after the usual number of retries, which now takes about 70 s instead of 90.
+- **Junk waits for the answer.** A browser is silent between its Initial and the server's reply, so a burst right after the Initial is a tell. The junk of a new flow goes out after the handshake response, where a browser sends its Handshake and first 1-RTT packets. For official clients the generator should set `Jc = 0` in a QUIC profile instead.
+
 I1-I5 can be changed on a running device without a data race: each of them is replaced atomically. They are replaced one by one, so a handshake sent during the change may carry some old and some new I-packets; the next one has only the new set.
 
 #### Generated QUIC Initials [client-side, this fork]

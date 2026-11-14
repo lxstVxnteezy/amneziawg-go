@@ -247,3 +247,58 @@ func FuzzParse(f *testing.F) {
 		CryptoData(b)
 	})
 }
+
+// A retransmission carries the same connection ID and ClientHello in
+// packets with the next packet numbers, as a client whose probe timeout
+// fired; only a new attempt changes the connection ID.
+func TestAttemptRetransmit(t *testing.T) {
+	a, err := NewAttempt("vpn.example.com", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := a.Flight()
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := a.Flight()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != len(again) {
+		t.Fatalf("flight of %d packets retransmitted as %d", len(first), len(again))
+	}
+	i1, err := Parse(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i2, err := Parse(again)
+	if err != nil {
+		t.Fatalf("retransmission is not a valid Initial flight: %v", err)
+	}
+	if !bytes.Equal(i1.DCID, i2.DCID) || !bytes.Equal(i1.DCID, a.DCID()) {
+		t.Fatal("retransmission changed the connection ID")
+	}
+	if !bytes.Equal(i1.ClientHello, i2.ClientHello) {
+		t.Fatal("retransmission changed the ClientHello")
+	}
+	for i := range first {
+		if bytes.Equal(first[i], again[i]) {
+			t.Fatalf("packet %d retransmitted byte for byte: packet number not advanced", i)
+		}
+		_, pn, _, err := Open(again[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := uint32(len(first) + i); pn != want {
+			t.Fatalf("retransmitted packet %d has pn %d, want %d", i, pn, want)
+		}
+	}
+
+	b, err := NewAttempt("vpn.example.com", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(a.DCID(), b.DCID()) {
+		t.Fatal("two attempts share a connection ID")
+	}
+}

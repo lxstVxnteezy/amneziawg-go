@@ -501,6 +501,7 @@ func (device *Device) RoutineHandshake(id int) {
 
 			peer.timersSessionDerived()
 			peer.timersHandshakeComplete()
+			peer.sendPendingJunk()
 			peer.SendKeepalive()
 		}
 	skip:

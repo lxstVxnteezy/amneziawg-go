@@ -352,6 +352,27 @@ const cryptoFrameOverhead = 1 + 2 + 2
 // each padded to 1250 bytes. An empty sni leaves the server_name
 // extension out, as a browser does for an IP address.
 func Flight(sni string, opts Options) ([][]byte, error) {
+	a, err := NewAttempt(sni, opts)
+	if err != nil {
+		return nil, err
+	}
+	return a.Flight()
+}
+
+// Attempt is one QUIC connection attempt: a connection ID and a
+// ClientHello. Its first Flight is the Initial flight; every later one is
+// what a client sends when the probe timeout fires without an answer: the
+// same CRYPTO data, the same connection IDs, in new packets with the next
+// packet numbers (RFC 9002, 6.2.4). A new connection ID would be a new
+// connection attempt, which a client does not start every few seconds.
+type Attempt struct {
+	dcid  []byte
+	hello []byte
+	pn    uint32
+}
+
+// NewAttempt builds a connection attempt; see Flight.
+func NewAttempt(sni string, opts Options) (*Attempt, error) {
 	if sni != "" {
 		if err := CheckSNI(sni); err != nil {
 			return nil, err
@@ -365,23 +386,38 @@ func Flight(sni string, opts Options) ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// header: 1 + 4 + 1+8 + 1+0 + 1 (token len) + 2 (length) + 4 (pn)
-	headerLen := 1 + 4 + 1 + len(dcid) + 1 + 1 + 2 + 4
-	room := initialDatagram - headerLen - 16 - cryptoFrameOverhead
+	a := &Attempt{dcid: dcid, hello: hello}
+	if n := (len(hello) + a.room() - 1) / a.room(); n > 5 {
+		return nil, errors.New("ClientHello needs more than the 5 available I-packets")
+	}
+	return a, nil
+}
 
+// DCID is the destination connection ID of the attempt.
+func (a *Attempt) DCID() []byte { return a.dcid }
+
+func (a *Attempt) room() int {
+	// header: 1 + 4 + 1+len(dcid) + 1+0 + 1 (token len) + 2 (length) + 4 (pn)
+	headerLen := 1 + 4 + 1 + len(a.dcid) + 1 + 1 + 2 + 4
+	return initialDatagram - headerLen - 16 - cryptoFrameOverhead
+}
+
+// Flight seals the ClientHello into Initial packets with the next packet
+// numbers. Not safe for concurrent use.
+func (a *Attempt) Flight() ([][]byte, error) {
+	headerLen := 1 + 4 + 1 + len(a.dcid) + 1 + 1 + 2 + 4
+	room := a.room()
 	var out [][]byte
-	for offset := 0; offset < len(hello); offset += room {
-		chunk := hello[offset:min(offset+room, len(hello))]
+	for offset := 0; offset < len(a.hello); offset += room {
+		chunk := a.hello[offset:min(offset+room, len(a.hello))]
 		frames := cryptoFrame(offset, chunk)
 		frames = append(frames, make([]byte, initialDatagram-headerLen-16-len(frames))...) // PADDING
-		p, err := sealInitial(dcid, nil, uint32(len(out)), frames)
+		p, err := sealInitial(a.dcid, nil, a.pn, frames)
 		if err != nil {
 			return nil, err
 		}
+		a.pn++
 		out = append(out, p)
-	}
-	if len(out) > 5 {
-		return nil, errors.New("ClientHello needs more than the 5 available I-packets")
 	}
 	return out, nil
 }

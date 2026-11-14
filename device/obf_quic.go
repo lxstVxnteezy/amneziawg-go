@@ -59,3 +59,8 @@ func newQuicFlight(args []string) (*quicFlight, error) {
 func (q *quicFlight) datagrams() ([][]byte, error) {
 	return quicinitial.Flight(q.sni, q.opts)
 }
+
+// attempt starts a connection attempt that can be retransmitted.
+func (q *quicFlight) attempt() (*quicinitial.Attempt, error) {
+	return quicinitial.NewAttempt(q.sni, q.opts)
+}

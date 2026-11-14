@@ -135,6 +135,7 @@ func CryptoData(frames []byte) (map[int][]byte, error) {
 func Parse(pkts [][]byte) (Info, error) {
 	var info Info
 	var stream []byte
+	var first uint32
 	for i, p := range pkts {
 		if len(p) < minInitialDatagram {
 			return info, fmt.Errorf("datagram %d is %d bytes, QUIC requires >= %d", i, len(p), minInitialDatagram)
@@ -143,7 +144,11 @@ func Parse(pkts [][]byte) (Info, error) {
 		if err != nil {
 			return info, fmt.Errorf("datagram %d: %w", i, err)
 		}
-		if pn != uint32(i) {
+		// a first flight starts at 0; a retransmission continues the
+		// numbering, packet after packet
+		if i == 0 {
+			first = pn
+		} else if pn != first+uint32(i) {
 			return info, fmt.Errorf("datagram %d has packet number %d", i, pn)
 		}
 		if info.DCID == nil {

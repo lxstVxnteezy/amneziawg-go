@@ -179,12 +179,14 @@ func TestGeneratedConfigsWorkInCore(t *testing.T) {
 			transit(t, cliTun, srvTun, c.Address, b.Address)
 			transit(t, srvTun, cliTun, b.Address, c.Address)
 
-			// What went on the wire before the first handshake: I-packets, junk.
+			// What went on the wire: I-packets and the handshake initiation;
+			// in a QUIC profile the junk waits for the server's answer (a
+			// browser is silent until then), so it comes after.
 			rec.mu.Lock()
 			sent := rec.sent
 			rec.mu.Unlock()
 			ni := len(c.IPackets)
-			if len(sent) < ni+b.Obf.Jc+1 {
+			if len(sent) < ni+1+b.Obf.Jc {
 				t.Fatalf("only %d datagrams sent", len(sent))
 			}
 			for i, ip := range c.IPackets {
@@ -193,13 +195,13 @@ func TestGeneratedConfigsWorkInCore(t *testing.T) {
 					t.Fatalf("datagram %d is not I%d", i, i+1)
 				}
 			}
-			for _, j := range sent[ni : ni+b.Obf.Jc] {
+			if init := sent[ni]; len(init) < 148+b.Obf.S1 {
+				t.Fatalf("handshake initiation is %d bytes, expected >= %d", len(init), 148+b.Obf.S1)
+			}
+			for _, j := range sent[ni+1 : ni+1+b.Obf.Jc] {
 				if len(j) < b.Obf.Jmin || len(j) >= b.Obf.Jmax {
 					t.Fatalf("junk packet of %d bytes outside [%d,%d)", len(j), b.Obf.Jmin, b.Obf.Jmax)
 				}
-			}
-			if init := sent[ni+b.Obf.Jc]; len(init) < 148+b.Obf.S1 {
-				t.Fatalf("handshake initiation is %d bytes, expected >= %d", len(init), 148+b.Obf.S1)
 			}
 			// the plain WireGuard type (1, 0, 0, 0) must not be visible
 			for _, p := range sent[ni:] {
