@@ -216,6 +216,15 @@ Package `splittun` wraps the client's TUN and sends chosen sites past the tunnel
 
 The direct connections are made by the process itself, so it must not route into its own tunnel: on Android the VPN excludes the app (`addDisallowedApplication`).
 
+**Tunnel-only mode** (`Config.TunnelOnly`) turns the rules around: the listed domains and networks go into the tunnel, everything else bypasses the VPN without touching it. The OS routes into the VPN only the DNS servers, `198.18.0.0/15` and the listed networks:
+
+- a query for a listed name goes into the tunnel (so the answer is not a Russian resolver's), and each A record of the answer is replaced with a stand-in from `198.18.0.0/15`; AAAA queries for listed names get an empty answer;
+- packets to a stand-in get the real address and go into the tunnel; replies get the stand-in back. Stand-ins map one to one to real addresses and live 30 minutes after the last answer or packet;
+- any other query is answered by the direct resolver with real addresses, which are not routed into the VPN: that traffic never reaches the wrapper, the userspace stack or the tunnel;
+- `preset:blocked` is a list of services that are blocked, slowed down or unavailable from Russia (YouTube, Meta, X, LinkedIn, Discord, ChatGPT/Claude, Spotify, ...); it is not complete.
+
+Same limits as the other mode: apps with their own DNS over HTTPS and connections to an address without a lookup go past the tunnel unless their networks are listed.
+
 Encrypted DNS would hide the queries: Android's automatic Private DNS tries DNS over TLS to the tunnel's resolver, and Chrome's automatic secure DNS upgrades 1.1.1.1 to DNS over HTTPS. Pass the tunnel's DNS servers as `Config.Resolvers`: TCP to them on 853 and 443 is answered with a reset and UDP on those ports is dropped, so both fall back to plain DNS. Private DNS set to a specific hostname, and apps with their own DoH server, still bypass the interception; their traffic to listed sites goes through the tunnel.
 
 ### Diagnostic counters [server-side, this fork]
