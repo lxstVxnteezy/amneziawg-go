@@ -130,11 +130,13 @@ func CryptoData(frames []byte) (map[int][]byte, error) {
 	return out, nil
 }
 
-// Parse decrypts the Initials of one connection attempt, reassembles the
-// ClientHello and reads SNI and ALPN from it.
+// Parse decrypts the Initials of one flight of a connection attempt (the
+// first one or a retransmission: consecutive packet numbers), reassembles
+// the ClientHello and reads SNI and ALPN from it.
 func Parse(pkts [][]byte) (Info, error) {
 	var info Info
 	var stream []byte
+	var first uint32
 	for i, p := range pkts {
 		if len(p) < minInitialDatagram {
 			return info, fmt.Errorf("datagram %d is %d bytes, QUIC requires >= %d", i, len(p), minInitialDatagram)
@@ -143,7 +145,10 @@ func Parse(pkts [][]byte) (Info, error) {
 		if err != nil {
 			return info, fmt.Errorf("datagram %d: %w", i, err)
 		}
-		if pn != uint32(i) {
+		if i == 0 {
+			first = pn
+		}
+		if pn != first+uint32(i) {
 			return info, fmt.Errorf("datagram %d has packet number %d", i, pn)
 		}
 		if info.DCID == nil {

@@ -48,6 +48,10 @@ type Device struct {
 		brokenRoaming bool
 	}
 
+	// bindGen counts successful BindUpdates: every new socket is a new
+	// flow (see flow.go).
+	bindGen atomic.Uint64
+
 	staticIdentity struct {
 		sync.RWMutex
 		privateKey NoisePrivateKey
@@ -112,7 +116,7 @@ type Device struct {
 	}
 
 	// I1-I5. Replaced by IpcSet while handshakes read them, hence atomic.
-	ipackets [5]atomic.Pointer[obfChain]
+	ipackets [numIPackets]atomic.Pointer[obfChain]
 
 	headerProtection struct {
 		sync.RWMutex
@@ -568,6 +572,8 @@ func (device *Device) BindUpdate() error {
 		netc.port = 0
 		return err
 	}
+
+	device.bindGen.Add(1)
 
 	netc.netlinkCancel, err = device.startRouteListener(netc.bind)
 	if err != nil {

@@ -172,7 +172,9 @@ func (peer *Peer) timersAnyAuthenticatedPacketReceived() {
 /* Should be called after a handshake initiation message is sent. */
 func (peer *Peer) timersHandshakeInitiated() {
 	if peer.timersActive() {
-		peer.timers.retransmitHandshake.Mod(peer.retransmitHandshakeTimeout() + time.Millisecond*time.Duration(fastrandn(RekeyTimeoutJitterMaxMs)))
+		// doubled while one QUIC attempt is retransmitted (flow.go)
+		timeout := peer.retransmitHandshakeTimeout() << min(peer.timers.retransmitBackoff.Load(), maxFlightSends-1)
+		peer.timers.retransmitHandshake.Mod(timeout + time.Millisecond*time.Duration(fastrandn(RekeyTimeoutJitterMaxMs)))
 	}
 }
 
@@ -185,6 +187,7 @@ func (peer *Peer) timersHandshakeComplete() {
 	peer.timers.maxHandshakeAttempts.Store(peer.device.maxHandshakeAttemps())
 	peer.timers.sentLastMinuteHandshake.Store(false)
 	peer.lastHandshakeNano.Store(time.Now().UnixNano())
+	peer.flowHandshakeComplete()
 }
 
 /* Should be called after an ephemeral key is created, which is before sending a handshake response or after receiving a handshake response. */

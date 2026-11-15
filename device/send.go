@@ -136,21 +136,14 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 		return err
 	}
 
-	var sendBuffer [][]byte
-
-	for i := range peer.device.ipackets {
-		if ipacket := peer.device.ipackets[i].Load(); ipacket != nil {
-			bufs, err := ipacket.Datagrams()
-			if err != nil {
-				// the handshake still goes out, without this disguise
-				peer.device.log.Errorf("%v - Failed to build I%d: %v", peer, i+1, err)
-				continue
-			}
-			sendBuffer = append(sendBuffer, bufs...)
-		}
+	// the I-packets and junk; with the QUIC shape only when the
+	// handshake starts a connection attempt on its flow (flow.go)
+	plan := peer.planHandshake()
+	peer.timers.retransmitBackoff.Store(uint32(plan.backoff))
+	sendBuffer := plan.ipackets
+	if plan.junk {
+		sendBuffer = append(sendBuffer, peer.device.JunkPackets()...)
 	}
-
-	sendBuffer = append(sendBuffer, peer.device.JunkPackets()...)
 
 	padding := int(peer.device.paddings.init.Load())
 	trailerLen := max(peer.randomTrailer(padding+MessageInitiationSize), 0)
