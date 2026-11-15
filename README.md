@@ -256,7 +256,7 @@ AmneziaWG sends the I-packets and junk before every handshake: at every rekey (e
 | first on a flow: new local port (rotation, rebind), new peer address, or the flow was silent longer than `RejectAfterTime` | I-packets (a new `<quic>` Initial) and junk: a new connection attempt |
 | repeat of an unanswered attempt (up to 2 times) | the same attempt again: a `<quic>` Initial is retransmitted with the same connection ID and ClientHello and the next packet numbers; no junk; the retry interval doubles each time, as QUIC's probe timeout does (RFC 9002) |
 | rekey after a completed handshake on the same flow | nothing: the handshake alone, shaped like a short-header packet |
-| 4th send without an answer | a new connection attempt, as above |
+| 4th send without an answer, or a send long after the previous one (the device gave up and data came later) | a new connection attempt, as above |
 
 Only the sender changes, so this works with any server, official or fork; servers never needed the I-packets. Without the QUIC shape every handshake carries the I-packets and junk as before. A fixed `<b 0x...>` Initial is resent byte for byte, packet number included; `<quic>` is the one that looks like a real retransmission.
 

@@ -78,6 +78,21 @@ func TestFlowRetransmitsAttempt(t *testing.T) {
 	}
 }
 
+// An attempt abandoned long ago is not retransmitted: the next handshake
+// starts a new one.
+func TestFlowStaleAttempt(t *testing.T) {
+	peer, pair, _ := flowPeer(t, "<quic sni=vpn.example.com>")
+	dcid, _ := dcidOf(t, peer.planHandshake())
+	peer.flow.Lock()
+	peer.flow.lastSend = time.Now().Add(-pair[0].dev.maxRetransmitGap() - time.Second)
+	peer.flow.Unlock()
+	p := peer.planHandshake()
+	d, pn := dcidOf(t, p)
+	if bytes.Equal(d, dcid) || pn != 0 || !p.junk {
+		t.Fatalf("a stale attempt was retransmitted: pn %d junk %v", pn, p.junk)
+	}
+}
+
 // After a completed handshake, rekeys on the same flow go alone. When they
 // stay unanswered, the flow is taken as lost and a new attempt starts.
 func TestFlowRekeyWithoutIPackets(t *testing.T) {

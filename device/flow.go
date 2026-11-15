@@ -63,6 +63,7 @@ type peerFlow struct {
 	established bool      // a handshake completed on this flow
 	completed   time.Time // when the last one did
 	sends       int       // handshakes sent since then (or in this attempt)
+	lastSend    time.Time // the latest of them
 	attempt     [numIPackets]ipacketAttempt
 }
 
@@ -116,6 +117,14 @@ func (peer *Peer) planHandshake() handshakePlan {
 		f.attempt = [numIPackets]ipacketAttempt{}
 	}
 
+	// a retransmission comes within the doubled timeouts; after a longer
+	// pause (the device gave up, data came minutes later) a client would
+	// have dropped that attempt
+	if f.sends > 0 && time.Since(f.lastSend) > device.maxRetransmitGap() {
+		f.sends = 0
+	}
+	f.lastSend = time.Now()
+
 	if f.established {
 		if f.sends < maxFlightSends {
 			// a rekey on a live flow: the handshake alone
@@ -148,6 +157,16 @@ func (peer *Peer) planHandshake() handshakePlan {
 	// a new connection attempt
 	f.sends = 1
 	return handshakePlan{ipackets: peer.freshIPackets(&f.attempt), junk: true}
+}
+
+// maxRetransmitGap is twice the longest interval between two sends of one
+// attempt.
+func (device *Device) maxRetransmitGap() time.Duration {
+	timeout := RekeyTimeout
+	if t := device.timings.rekeyTimeoutSec.Load(); !t.IsZero() {
+		timeout = time.Duration(t.Hi()) * time.Second
+	}
+	return 2 * (timeout<<(maxFlightSends-1) + time.Millisecond*RekeyTimeoutJitterMaxMs)
 }
 
 // attemptCurrent reports whether the attempt was made from the I-packets
