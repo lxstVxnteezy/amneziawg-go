@@ -54,6 +54,7 @@ type Device struct {
 	inner   tun.Device
 	cfg     Config
 	domains atomic.Pointer[matcher] // the config's domains and the fetched lists
+	nets    atomic.Pointer[netSet]  // the config's networks and the fetched lists
 	stack   *direct
 	fakes   *fakeMap // tunnel-only mode
 
@@ -117,6 +118,8 @@ func New(inner tun.Device, cfg Config) (*Device, error) {
 	}
 	m := newMatcher(cfg.Rules.Domains)
 	d.domains.Store(&m)
+	ns := newNetSet(cfg.Rules.Networks)
+	d.nets.Store(&ns)
 	d.pool.New = func() any { b := make([]byte, 65535); return &b }
 	if d.stack, err = newDirect(mtu, cfg.Dial, d.writeToOS, cfg.Log); err != nil {
 		return nil, err
@@ -191,13 +194,13 @@ func (d *Device) route(pkt []byte) bool {
 	sport := binary.BigEndian.Uint16(pkt[ihl:])
 	dport := binary.BigEndian.Uint16(pkt[ihl+2:])
 
-	if len(d.names()) > 0 && (dport == 853 || dport == 443) && slices.Contains(d.cfg.Resolvers, dst) {
+	if !d.names().empty() && (dport == 853 || dport == 443) && slices.Contains(d.cfg.Resolvers, dst) {
 		if proto == 6 && len(pkt) >= ihl+14 && pkt[ihl+13]&0x12 == 0x02 {
 			d.stack.inject(pkt) // the stack answers with a reset
 		}
 		return false // UDP (DoQ, DoH3): dropped
 	}
-	if proto == 17 && dport == 53 && len(d.names()) > 0 {
+	if proto == 17 && dport == 53 && !d.names().empty() {
 		if q, ok := parseQuery(pkt[ihl+8:]); ok && d.names().match(q.name) {
 			d.Stats.DirectQueries.Add(1)
 			select {
@@ -251,10 +254,8 @@ func (d *Device) route(pkt []byte) bool {
 }
 
 func (d *Device) isDirect(a netip.Addr) bool {
-	for _, p := range d.cfg.Rules.Networks {
-		if p.Contains(a) {
-			return true
-		}
+	if d.networks().contains(a) {
+		return true
 	}
 	d.amu.Lock()
 	until, ok := d.addrs[a]
@@ -378,6 +379,14 @@ func (d *Device) BatchSize() int           { return 1 }
 
 // names is the current set of listed domains.
 func (d *Device) names() matcher { return *d.domains.Load() }
+
+// networks is the current set of listed networks.
+func (d *Device) networks() netSet {
+	if n := d.nets.Load(); n != nil {
+		return *n
+	}
+	return netSet{}
+}
 
 func (d *Device) Close() error {
 	d.once.Do(func() {

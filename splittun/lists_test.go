@@ -34,7 +34,7 @@ func TestParseRulesLists(t *testing.T) {
 }
 
 func TestReadList(t *testing.T) {
-	names, err := readList(strings.NewReader(`# blocked sites
+	names, _, err := readList(strings.NewReader(`# blocked sites
 youtube.com
   .Instagram.COM  # with a note
 0.0.0.0 tracker.example
@@ -50,7 +50,7 @@ not a domain!
 	if got := strings.Join(names, " "); got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
-	if _, err := readList(strings.NewReader(strings.Repeat("a.example\n", listMaxBytes/10+1))); err == nil {
+	if _, _, err := readList(strings.NewReader(strings.Repeat("a.example\n", listMaxBytes/10+1))); err == nil {
 		t.Fatal("a list over the size limit accepted")
 	}
 }

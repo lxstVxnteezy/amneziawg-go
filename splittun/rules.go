@@ -96,7 +96,7 @@ func ParseRules(domains, networks, dns string) (Rules, error) {
 			r.Lists = append(r.Lists, u)
 			continue
 		}
-		n, err := normalizeDomain(d)
+		n, err := normalizeRule(d)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -104,20 +104,16 @@ func ParseRules(domains, networks, dns string) (Rules, error) {
 		r.Domains = append(r.Domains, n)
 	}
 	for _, n := range fields(networks) {
-		p, err := netip.ParsePrefix(n)
-		if err != nil {
-			a, aerr := netip.ParseAddr(n)
-			if aerr != nil {
-				errs = append(errs, fmt.Errorf("network %q: %w", n, err))
-				continue
-			}
-			p = netip.PrefixFrom(a, a.BitLen())
-		}
-		if !p.Addr().Is4() {
+		p, err := parseNetwork(n)
+		if err == errNotNetwork {
 			errs = append(errs, fmt.Errorf("network %q: only IPv4 goes directly", n))
 			continue
 		}
-		r.Networks = append(r.Networks, p.Masked())
+		if err != nil {
+			errs = append(errs, fmt.Errorf("network %q: %w", n, err))
+			continue
+		}
+		r.Networks = append(r.Networks, p)
 	}
 	r.DNS = DefaultDNS
 	if dns = strings.TrimSpace(dns); dns != "" {
@@ -151,28 +147,3 @@ func normalizeDomain(d string) (string, error) {
 
 // Empty reports whether nothing would go directly.
 func (r Rules) Empty() bool { return len(r.Domains) == 0 && len(r.Networks) == 0 && len(r.Lists) == 0 }
-
-// matcher answers "is this name listed" with one map lookup per label.
-type matcher map[string]struct{}
-
-func newMatcher(domains []string) matcher {
-	m := matcher{}
-	for _, d := range domains {
-		m[d] = struct{}{}
-	}
-	return m
-}
-
-func (m matcher) match(name string) bool {
-	name = strings.TrimSuffix(strings.ToLower(name), ".")
-	for {
-		if _, ok := m[name]; ok {
-			return true
-		}
-		i := strings.IndexByte(name, '.')
-		if i < 0 {
-			return false
-		}
-		name = name[i+1:]
-	}
-}
