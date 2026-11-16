@@ -165,7 +165,7 @@ func (d *Device) routeTunnelOnly(pkt []byte) bool {
 	if !ok {
 		return true
 	}
-	if d.domains.match(q.name) {
+	if d.names().match(q.name) {
 		if q.qtype == dnsmessage.TypeAAAA {
 			// stand-ins are IPv4: no IPv6 addresses, so the app uses them
 			if a := emptyAnswer(pkt[ihl+8:]); a != nil {
@@ -243,7 +243,7 @@ func (d *Device) standInAnswers(msg []byte) bool {
 		return false
 	}
 	q, err := p.Question()
-	if err != nil || q.Class != dnsmessage.ClassINET || !d.domains.match(q.Name.String()) {
+	if err != nil || q.Class != dnsmessage.ClassINET || !d.names().match(q.Name.String()) {
 		return false
 	}
 	// walk the wire format to find each A record's data
