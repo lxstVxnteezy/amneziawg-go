@@ -82,3 +82,23 @@ func TestKernelIPacketsFitModule(t *testing.T) {
 		t.Errorf("-kernel I-packets take %d netlink bytes, the module takes %d", n, kernelChainBudget)
 	}
 }
+
+// -jc, -jmin and -jmax reach the configs; out-of-range values are refused.
+func TestJunkFlags(t *testing.T) {
+	opts := Options{Endpoint: "vpn.example.com", Port: 443, Clients: 1,
+		Subnet: netip.MustParsePrefix("10.0.0.0/24"), MTU: 1280, WAN: "eth0", Jc: 4, Jmin: 50, Jmax: 300}
+	b, err := Generate(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Obf.Jc != 4 || b.Obf.Jmin != 50 || b.Obf.Jmax != 300 {
+		t.Fatalf("got Jc %d, Jmin %d, Jmax %d", b.Obf.Jc, b.Obf.Jmin, b.Obf.Jmax)
+	}
+	for _, bad := range [][3]int{{11, 0, 0}, {-1, 0, 0}, {3, 200, 100}, {3, 0, 100}, {3, 40, 1281}} {
+		o := opts
+		o.Jc, o.Jmin, o.Jmax = bad[0], bad[1], bad[2]
+		if _, err := Generate(o); err == nil {
+			t.Errorf("Jc/Jmin/Jmax %v accepted", bad)
+		}
+	}
+}

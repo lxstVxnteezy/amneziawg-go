@@ -42,6 +42,11 @@ type Options struct {
 	// kernel module (routers, awg-quick with the module): the module takes
 	// I1-I5 only up to about 3.4 KB, the full flight is about 5 KB.
 	Kernel bool
+
+	// Jc, Jmin, Jmax override the junk; Jmin = Jmax = 0 keeps the random
+	// sizes. Jc defaults to 0 (see newObfuscation), a choice made from
+	// reasoning, not measurement, so it is left to the user.
+	Jc, Jmin, Jmax int
 }
 
 type keyPair struct {
@@ -195,6 +200,13 @@ func headerRanges() [4]string {
 	return out
 }
 
+// Limits of -jc, -jmin and -jmax: official AmneziaVPN and AmneziaWG apps
+// take Jc up to 10; a junk datagram above the path MTU is fragmented.
+const (
+	maxJunkCount = 10
+	maxJunkSize  = 1280
+)
+
 func newObfuscation() Obfuscation {
 	var o Obfuscation
 
@@ -289,6 +301,14 @@ func Generate(opts Options) (*Bundle, error) {
 	if opts.WAN != "" && !wanName.MatchString(opts.WAN) {
 		return nil, fmt.Errorf("bad WAN interface name %q", opts.WAN)
 	}
+	if opts.Jc < 0 || opts.Jc > maxJunkCount {
+		return nil, fmt.Errorf("-jc must be 0-%d: official apps take no more", maxJunkCount)
+	}
+	if opts.Jmin != 0 || opts.Jmax != 0 {
+		if opts.Jmin < 1 || opts.Jmin > opts.Jmax || opts.Jmax > maxJunkSize {
+			return nil, fmt.Errorf("need 1 <= -jmin <= -jmax <= %d (larger datagrams fragment)", maxJunkSize)
+		}
+	}
 
 	b := &Bundle{
 		Opts:     opts,
@@ -296,6 +316,10 @@ func Generate(opts Options) (*Bundle, error) {
 		Address:  opts.Subnet.Addr().Next(),
 		Obf:      newObfuscation(),
 		Warnings: warnings,
+	}
+	b.Obf.Jc = opts.Jc
+	if opts.Jmin != 0 {
+		b.Obf.Jmin, b.Obf.Jmax = opts.Jmin, opts.Jmax
 	}
 	addr := b.Address
 	for i := range opts.Clients {
