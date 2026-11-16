@@ -141,6 +141,7 @@ func TestGeneratedConfigsWorkInCore(t *testing.T) {
 		Clients:  2,
 		Subnet:   netip.MustParsePrefix("10.66.66.0/24"),
 		MTU:      1280,
+		Jc:       3, // junk still has to reach the wire as configured
 		SNI:      "www.google.com",
 		WAN:      "eth0",
 	})

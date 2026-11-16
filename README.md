@@ -75,6 +75,8 @@ It writes `awg-configs/server/awg0.conf` and `awg-configs/clients/clientN.conf`.
 | `-disable-cookies` | off | turn off the cookie mechanism; this also removes handshake flood protection |
 | `-dns` | `1.1.1.1, 1.0.0.1` | DNS servers for clients |
 | `-fork` | off | clients run this fork: `I1 = <quic sni=...>` (or `<quic>` without SNI), a new QUIC Initial before every handshake instead of fixed bytes (official clients reject it) |
+| `-jc` | `0` | junk packets before a handshake, 0-10 (see below) |
+| `-jmin`, `-jmax` | random 40-100, +100-500 | junk packet sizes in bytes, 1-1280 |
 | `-kernel` | off | clients use the Linux kernel module (routers, awg-quick with the module): one Initial with a classic ClientHello instead of Chrome's two datagrams, so I1-I5 fit the module (see below) |
 
 The configs are written with mode 0600 through a temporary file and a rename, so a rerun replaces old configs atomically and also tightens files that had broader permissions. The generator refuses an endpoint or DNS value with a line break, a port outside 1-65535 and a `-wan` that is not a plain interface name (`[a-zA-Z0-9_.@-]`, up to 15 characters), because those values end up in the config and in the server's PostUp/PostDown commands.
@@ -85,7 +87,7 @@ The Linux kernel module takes the whole device in one netlink message of a page,
 
 Other choices the generator makes:
 
-- `Jc = 0`: every flow starts with a QUIC Initial, and a browser is silent after it until the server answers, so a burst of junk there is a tell. Jmin and Jmax stay in the config, unused.
+- `Jc = 0` by default: every flow starts with a QUIC Initial, and a browser is silent after it until the server answers, so a burst of junk there can be a tell. This is reasoning, not a measurement: whether a DPI follows the flow past the Initial is not known, Amnezia recommends 4-12, and the OPNsense plugin rejects 0. `-jc 3` (or more, up to the 10 official apps take) gives the usual values.
 - H1-H4 are narrow ranges, at most 50 000 values each and all at or below 2^31-1 (old AmneziaWG for Android and wg-easy read them as signed). Header protection encrypts the type field, so the width hides nothing on the wire. With `RandomTrailers` the receiver no longer checks the exact size of handshakes and tries every transport packet against H1-H3; bytes that fall inside a range get the packet dropped, about (W1+W2+W3)/2^32 of the traffic. Ranges 10 million wide lost up to 0.7 %; these lose under 0.004 %.
 
 Pick the SNI so that it resolves to the server: a DPI can compare the SNI of a QUIC Initial with the destination IP, and `www.google.com` on a VPS address is easy to flag. Point a domain of yours at the server and pass it as `-endpoint` (it becomes the SNI) or as `-sni`. With an IP endpoint and no `-sni` the I-packets carry no SNI at all, as a browser connecting to an IP address does (TLS does not allow an IP in SNI), and the generator prints a warning. A borrowed popular domain is worse than none: it does not resolve to the server.
