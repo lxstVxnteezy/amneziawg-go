@@ -168,6 +168,7 @@ Notes:
 - Rotation is skipped when `ListenPort` is set explicitly, so a server never moves.
 - Packets the server sends in the short gap before it learns the new port are lost. TCP resends them.
 - Every rotation is a new handshake that resends the I-packets. With fixed ones very short intervals make the repeats more visible; with `<quic sni=...>` every rotation looks like a new connection attempt. A few minutes is a reasonable interval either way.
+- With a QUIC disguise a rotation is the only time a running tunnel sends a new Initial: rekeys on the same port go without I-packets and junk (see "One Initial per flow").
 
 ### Fallback to a real site [server-side, this fork]
 
@@ -215,6 +216,15 @@ Package `splittun` wraps the client's TUN and sends chosen sites past the tunnel
 
 The direct connections are made by the process itself, so it must not route into its own tunnel: on Android the VPN excludes the app (`addDisallowedApplication`).
 
+**Tunnel-only mode** (`Config.TunnelOnly`) turns the rules around: the listed domains and networks go into the tunnel, everything else bypasses the VPN without touching it. The OS routes into the VPN only the DNS servers, `198.18.0.0/15` and the listed networks:
+
+- a query for a listed name goes into the tunnel (so the answer is not a Russian resolver's), and each A record of the answer is replaced with a stand-in from `198.18.0.0/15`; AAAA queries for listed names get an empty answer;
+- packets to a stand-in get the real address and go into the tunnel; replies get the stand-in back. Stand-ins map one to one to real addresses and live 30 minutes after the last answer or packet;
+- any other query is answered by the direct resolver with real addresses, which are not routed into the VPN: that traffic never reaches the wrapper, the userspace stack or the tunnel;
+- `preset:blocked` is a list of services that are blocked, slowed down or unavailable from Russia (YouTube, Meta, X, LinkedIn, Discord, ChatGPT/Claude, Spotify, ...); it is not complete.
+
+Same limits as the other mode: apps with their own DNS over HTTPS and connections to an address without a lookup go past the tunnel unless their networks are listed.
+
 Encrypted DNS would hide the queries: Android's automatic Private DNS tries DNS over TLS to the tunnel's resolver, and Chrome's automatic secure DNS upgrades 1.1.1.1 to DNS over HTTPS. Pass the tunnel's DNS servers as `Config.Resolvers`: TCP to them on 853 and 443 is answered with a reset and UDP on those ports is dropped, so both fall back to plain DNS. Private DNS set to a specific hostname, and apps with their own DoH server, still bypass the interception; their traffic to listed sites goes through the tunnel.
 
 ### Diagnostic counters [server-side, this fork]
@@ -245,6 +255,21 @@ When the disguise is QUIC, the fork makes the first byte of junk, handshake, coo
 Nothing else changes on the wire and the receiver never reads these bits, so a shaping side works with any peer, official or fork. With an S prefix of 0 (AWG 1.x levels) there is nothing to shape. Two of the 96 bits of the header protection nonce become fixed; 94 stay random.
 
 This removes the cheapest tell, not every one: the server still does not answer the Initial the way an HTTP/3 server would, and a stateful parser can notice that.
+
+### One Initial per flow [client-side, this fork, automatic]
+
+AmneziaWG sends the I-packets and junk before every handshake: at every rekey (every 100-120 s with the usual timings) and at every retry. With a QUIC disguise that is a new QUIC Initial in the middle of a flow that already carries short-header traffic, and a QUIC client never starts its connection over on the same flow. With the QUIC shape on, the fork keeps the state of each peer's flow (local socket and peer address) and sends a handshake the way a QUIC client sends its packets:
+
+| Handshake | What goes before it |
+|-----------|---------------------|
+| first on a flow: new local port (rotation, rebind), new peer address, or the flow was silent longer than `RejectAfterTime` | I-packets (a new `<quic>` Initial) and junk: a new connection attempt |
+| repeat of an unanswered attempt (up to 2 times) | the same attempt again: a `<quic>` Initial is retransmitted with the same connection ID and ClientHello and the next packet numbers; no junk; the retry interval doubles each time, as QUIC's probe timeout does (RFC 9002) |
+| rekey after a completed handshake on the same flow | nothing: the handshake alone, shaped like a short-header packet |
+| 4th send without an answer, or a send long after the previous one (the device gave up and data came later) | a new connection attempt, as above |
+
+Only the sender changes, so this works with any server, official or fork; servers never needed the I-packets. Without the QUIC shape every handshake carries the I-packets and junk as before. A fixed `<b 0x...>` Initial is resent byte for byte, packet number included; `<quic>` is the one that looks like a real retransmission.
+
+Retries of an unanswered attempt come after 1, 2 and 4 `RekeyTimeout` intervals instead of 1, 1, 1, so a client whose server is unreachable gives up (`MaxHandshakeAttempts`) about twice as late and reconnects up to a few `RekeyTimeout` later once the server is back.
 
 ### Junk packets
 

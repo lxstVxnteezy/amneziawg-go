@@ -352,6 +352,27 @@ const cryptoFrameOverhead = 1 + 2 + 2
 // each padded to 1250 bytes. An empty sni leaves the server_name
 // extension out, as a browser does for an IP address.
 func Flight(sni string, opts Options) ([][]byte, error) {
+	a, err := NewAttempt(sni, opts)
+	if err != nil {
+		return nil, err
+	}
+	return a.Flight()
+}
+
+// Attempt is one QUIC connection attempt of a client. A client that hears
+// nothing back sends its Initial flight again (RFC 9002, probe timeout):
+// the same connection ID and the same ClientHello in new packets, whose
+// packet numbers go on from the previous flight. A new attempt with a new
+// connection ID in the middle of a flow is what a browser never does.
+type Attempt struct {
+	dcid  []byte
+	hello []byte
+	pn    uint32 // packet number of the next Initial
+}
+
+// NewAttempt picks the connection ID and builds the ClientHello of a new
+// connection attempt. Nothing is sent until Flight.
+func NewAttempt(sni string, opts Options) (*Attempt, error) {
 	if sni != "" {
 		if err := CheckSNI(sni); err != nil {
 			return nil, err
@@ -365,16 +386,22 @@ func Flight(sni string, opts Options) ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return &Attempt{dcid: dcid, hello: hello}, nil
+}
+
+// Flight returns the Initial datagrams of the attempt: the first flight on
+// the first call, a retransmission of it on every later one.
+func (a *Attempt) Flight() ([][]byte, error) {
 	// header: 1 + 4 + 1+8 + 1+0 + 1 (token len) + 2 (length) + 4 (pn)
-	headerLen := 1 + 4 + 1 + len(dcid) + 1 + 1 + 2 + 4
+	headerLen := 1 + 4 + 1 + len(a.dcid) + 1 + 1 + 2 + 4
 	room := initialDatagram - headerLen - 16 - cryptoFrameOverhead
 
 	var out [][]byte
-	for offset := 0; offset < len(hello); offset += room {
-		chunk := hello[offset:min(offset+room, len(hello))]
+	for offset := 0; offset < len(a.hello); offset += room {
+		chunk := a.hello[offset:min(offset+room, len(a.hello))]
 		frames := cryptoFrame(offset, chunk)
 		frames = append(frames, make([]byte, initialDatagram-headerLen-16-len(frames))...) // PADDING
-		p, err := sealInitial(dcid, nil, uint32(len(out)), frames)
+		p, err := sealInitial(a.dcid, nil, a.pn+uint32(len(out)), frames)
 		if err != nil {
 			return nil, err
 		}
@@ -383,5 +410,6 @@ func Flight(sni string, opts Options) ([][]byte, error) {
 	if len(out) > 5 {
 		return nil, errors.New("ClientHello needs more than the 5 available I-packets")
 	}
+	a.pn += uint32(len(out))
 	return out, nil
 }

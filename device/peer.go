@@ -25,6 +25,7 @@ type Peer struct {
 	txBytes           atomic.Uint64  // bytes send to peer (endpoint)
 	rxBytes           atomic.Uint64  // bytes received from peer
 	lastHandshakeNano atomic.Int64   // nano seconds since epoch
+	flow              peerFlow       // see flow.go
 
 	endpoint struct {
 		sync.Mutex
@@ -40,6 +41,7 @@ type Peer struct {
 		zeroKeyMaterial         *Timer
 		persistentKeepalive     *Timer
 		handshakeAttempts       atomic.Uint32
+		retransmitBackoff       atomic.Uint32 // the next retransmit timeout is shifted left by this (flow.go)
 		maxHandshakeAttempts    atomic.Uint32
 		needAnotherKeepalive    atomic.Bool
 		sentLastMinuteHandshake atomic.Bool

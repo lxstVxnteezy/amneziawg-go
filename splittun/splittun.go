@@ -31,6 +31,11 @@ type Config struct {
 	Resolvers []netip.Addr
 	Dial      Dialer // nil: net.Dialer
 	Log       Logger // nil: silent
+	// TunnelOnly turns the rules around: the listed domains and networks
+	// go into the tunnel and everything else bypasses the VPN (see
+	// reverse.go). The OS must then route into the VPN only the DNS
+	// servers, FakeRange and the listed networks.
+	TunnelOnly bool
 }
 
 const (
@@ -50,6 +55,7 @@ type Device struct {
 	cfg     Config
 	domains matcher
 	stack   *direct
+	fakes   *fakeMap // tunnel-only mode
 
 	tunnel   chan []byte // packets for the WireGuard device
 	dnsSlots chan struct{}
@@ -108,6 +114,7 @@ func New(inner tun.Device, cfg Config) (*Device, error) {
 		addrs:    map[netip.Addr]time.Time{},
 		flows:    map[flowKey]*flow{},
 		closed:   make(chan struct{}),
+		fakes:    newFakeMap(FakeRange),
 	}
 	d.pool.New = func() any { b := make([]byte, 65535); return &b }
 	if d.stack, err = newDirect(mtu, cfg.Dial, d.writeToOS, cfg.Log); err != nil {
@@ -161,6 +168,9 @@ func (d *Device) pump() {
 // route decides one packet from the OS. true: into the tunnel; false:
 // handled here (it must not be kept: the buffer is reused).
 func (d *Device) route(pkt []byte) bool {
+	if d.cfg.TunnelOnly {
+		return d.routeTunnelOnly(pkt)
+	}
 	if len(pkt) < 20 || pkt[0]>>4 != 4 {
 		return true // IPv6 and the rest: the tunnel decides
 	}
@@ -345,6 +355,13 @@ func (d *Device) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 }
 
 func (d *Device) Write(bufs [][]byte, offset int) (int, error) {
+	if d.cfg.TunnelOnly {
+		for _, b := range bufs {
+			if len(b) > offset {
+				d.fromTunnel(b[offset:])
+			}
+		}
+	}
 	d.wmu.Lock()
 	defer d.wmu.Unlock()
 	return d.inner.Write(bufs, offset)

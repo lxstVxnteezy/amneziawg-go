@@ -1,4 +1,5 @@
-// Package splittun sends chosen sites past the tunnel, by domain name,
+// Package splittun sends chosen sites past the tunnel (or, with
+// Config.TunnelOnly, only chosen sites into it; see reverse.go), by domain name,
 // the way Xray-based clients route "geosite" rules: a wrapper between the
 // operating system's TUN and the WireGuard device.
 //
@@ -47,6 +48,24 @@ var PresetRU = []string{
 	"wbstatic.net", "wbbasket.ru", "avito.st", "2gis.com", "sberbank.com", "tochka.com", "ozone.ru",
 }
 
+// PresetBlocked is "into the tunnel only what is blocked": services that
+// are blocked or slowed down in Russia, or that refuse Russian addresses
+// themselves. Not complete: add your own names next to it.
+var PresetBlocked = []string{
+	// YouTube (slowed down since 2024) and its CDNs
+	"youtube.com", "youtu.be", "ytimg.com", "googlevideo.com", "ggpht.com", "youtube-nocookie.com", "youtubei.googleapis.com",
+	// Meta (blocked since 2022)
+	"instagram.com", "cdninstagram.com", "facebook.com", "fbcdn.net", "fb.com", "messenger.com", "threads.net",
+	// X / Twitter, LinkedIn, Discord
+	"x.com", "twitter.com", "twimg.com", "t.co", "linkedin.com", "licdn.com",
+	"discord.com", "discord.gg", "discordapp.com", "discordapp.net", "discord.media",
+	// services that do not serve Russian addresses
+	"openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com", "anthropic.com", "claude.ai",
+	"spotify.com", "scdn.co", "notion.so",
+	// others blocked by Roskomnadzor
+	"rutracker.org", "torproject.org", "proton.me", "signal.org",
+}
+
 // DefaultDNS is the direct resolver when none is given (Yandex DNS).
 var DefaultDNS = netip.MustParseAddrPort("77.88.8.8:53")
 
@@ -59,6 +78,10 @@ func ParseRules(domains, networks, dns string) (Rules, error) {
 	for _, d := range fields(domains) {
 		if strings.EqualFold(d, "preset:ru") {
 			r.Domains = append(r.Domains, PresetRU...)
+			continue
+		}
+		if strings.EqualFold(d, "preset:blocked") {
+			r.Domains = append(r.Domains, PresetBlocked...)
 			continue
 		}
 		n, err := normalizeDomain(d)

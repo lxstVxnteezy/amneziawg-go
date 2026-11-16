@@ -218,6 +218,50 @@ func TestFlightsDiffer(t *testing.T) {
 	}
 }
 
+// A retransmission repeats the attempt: same connection ID and
+// ClientHello, packet numbers going on, and none of the bytes repeat.
+func TestAttemptRetransmits(t *testing.T) {
+	a, err := NewAttempt("vk.com", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := a.Flight()
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := a.Flight()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 || len(again) != 2 {
+		t.Fatalf("flights of %d and %d datagrams", len(first), len(again))
+	}
+	i1, err := Parse(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i2, err := Parse(again)
+	if err != nil {
+		t.Fatalf("retransmission: %v", err)
+	}
+	if !bytes.Equal(i1.DCID, i2.DCID) || !bytes.Equal(i1.ClientHello, i2.ClientHello) {
+		t.Fatal("retransmission changed the connection ID or the ClientHello")
+	}
+	for i, p := range again {
+		if _, pn, _ := openInitial(t, p); pn != uint32(2+i) {
+			t.Errorf("retransmitted Initial %d has packet number %d, want %d", i, pn, 2+i)
+		}
+		if len(p) != len(first[i]) {
+			t.Errorf("retransmitted Initial %d is %d bytes, first one %d", i, len(p), len(first[i]))
+		}
+		for _, q := range first {
+			if bytes.Equal(p, q) {
+				t.Errorf("retransmitted Initial %d repeats the bytes of the first flight", i)
+			}
+		}
+	}
+}
+
 func TestCheckSNI(t *testing.T) {
 	for _, ok := range []string{"vk.com", "vpn.example.com", "xn--80ak6aa92e.com"} {
 		if err := CheckSNI(ok); err != nil {
