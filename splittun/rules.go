@@ -34,6 +34,9 @@ type Rules struct {
 	// answers point at servers near the user (Russian CDNs answer
 	// differently abroad).
 	DNS netip.AddrPort
+	// Lists are URLs of domain lists ("list:https://..."), fetched and
+	// refreshed by the device (lists.go).
+	Lists []string
 }
 
 // PresetRU is "Russian sites directly": the national zones and the big
@@ -82,6 +85,15 @@ func ParseRules(domains, networks, dns string) (Rules, error) {
 		}
 		if strings.EqualFold(d, "preset:blocked") {
 			r.Domains = append(r.Domains, PresetBlocked...)
+			continue
+		}
+		if len(d) > 5 && strings.EqualFold(d[:5], "list:") {
+			u, err := parseListURL(d[5:])
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			r.Lists = append(r.Lists, u)
 			continue
 		}
 		n, err := normalizeDomain(d)
@@ -138,7 +150,7 @@ func normalizeDomain(d string) (string, error) {
 }
 
 // Empty reports whether nothing would go directly.
-func (r Rules) Empty() bool { return len(r.Domains) == 0 && len(r.Networks) == 0 }
+func (r Rules) Empty() bool { return len(r.Domains) == 0 && len(r.Networks) == 0 && len(r.Lists) == 0 }
 
 // matcher answers "is this name listed" with one map lookup per label.
 type matcher map[string]struct{}

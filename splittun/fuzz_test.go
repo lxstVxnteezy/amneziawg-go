@@ -40,7 +40,9 @@ func FuzzDNSFromNetwork(f *testing.F) {
 	f.Add(dnsAnswer(f, "example.org."))
 	f.Add([]byte{0, 7, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0, 0xc0, 0x0c})
 	f.Fuzz(func(t *testing.T, msg []byte) {
-		d := &Device{domains: newMatcher([]string{"youtube.com"}), fakes: newFakeMap(FakeRange)}
+		d := &Device{fakes: newFakeMap(FakeRange)}
+		m := newMatcher([]string{"youtube.com"})
+		d.domains.Store(&m)
 		n := len(msg)
 		d.standInAnswers(msg)
 		if len(msg) != n {

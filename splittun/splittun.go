@@ -53,7 +53,7 @@ const (
 type Device struct {
 	inner   tun.Device
 	cfg     Config
-	domains matcher
+	domains atomic.Pointer[matcher] // the config's domains and the fetched lists
 	stack   *direct
 	fakes   *fakeMap // tunnel-only mode
 
@@ -108,7 +108,6 @@ func New(inner tun.Device, cfg Config) (*Device, error) {
 	d := &Device{
 		inner:    inner,
 		cfg:      cfg,
-		domains:  newMatcher(cfg.Rules.Domains),
 		tunnel:   make(chan []byte, queueLen),
 		dnsSlots: make(chan struct{}, maxDNS),
 		addrs:    map[netip.Addr]time.Time{},
@@ -116,6 +115,8 @@ func New(inner tun.Device, cfg Config) (*Device, error) {
 		closed:   make(chan struct{}),
 		fakes:    newFakeMap(FakeRange),
 	}
+	m := newMatcher(cfg.Rules.Domains)
+	d.domains.Store(&m)
 	d.pool.New = func() any { b := make([]byte, 65535); return &b }
 	if d.stack, err = newDirect(mtu, cfg.Dial, d.writeToOS, cfg.Log); err != nil {
 		return nil, err
@@ -125,6 +126,9 @@ func New(inner tun.Device, cfg Config) (*Device, error) {
 	}
 	go d.pump()
 	go d.sweep()
+	if len(cfg.Rules.Lists) > 0 {
+		go d.refreshLists()
+	}
 	return d, nil
 }
 
@@ -187,14 +191,14 @@ func (d *Device) route(pkt []byte) bool {
 	sport := binary.BigEndian.Uint16(pkt[ihl:])
 	dport := binary.BigEndian.Uint16(pkt[ihl+2:])
 
-	if len(d.domains) > 0 && (dport == 853 || dport == 443) && slices.Contains(d.cfg.Resolvers, dst) {
+	if len(d.names()) > 0 && (dport == 853 || dport == 443) && slices.Contains(d.cfg.Resolvers, dst) {
 		if proto == 6 && len(pkt) >= ihl+14 && pkt[ihl+13]&0x12 == 0x02 {
 			d.stack.inject(pkt) // the stack answers with a reset
 		}
 		return false // UDP (DoQ, DoH3): dropped
 	}
-	if proto == 17 && dport == 53 && len(d.domains) > 0 {
-		if q, ok := parseQuery(pkt[ihl+8:]); ok && d.domains.match(q.name) {
+	if proto == 17 && dport == 53 && len(d.names()) > 0 {
+		if q, ok := parseQuery(pkt[ihl+8:]); ok && d.names().match(q.name) {
 			d.Stats.DirectQueries.Add(1)
 			select {
 			case d.dnsSlots <- struct{}{}:
@@ -371,6 +375,9 @@ func (d *Device) MTU() (int, error)        { return d.inner.MTU() }
 func (d *Device) Name() (string, error)    { return d.inner.Name() }
 func (d *Device) Events() <-chan tun.Event { return d.inner.Events() }
 func (d *Device) BatchSize() int           { return 1 }
+
+// names is the current set of listed domains.
+func (d *Device) names() matcher { return *d.domains.Load() }
 
 func (d *Device) Close() error {
 	d.once.Do(func() {

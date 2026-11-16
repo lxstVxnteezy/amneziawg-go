@@ -106,17 +106,25 @@ func TestHandshakeWaitsForTheAnswer(t *testing.T) {
 	// to its connection ID, sealed with the first DCID's keys; then the
 	// handshake as one QUIC Handshake packet to the same connection ID
 	firstDCID := sent[0][6 : 6+sent[0][5]]
-	var ack, hs []byte
+	var ack, hs, hsAck []byte
 	for _, d := range sent[1:] {
 		switch {
 		case isQUICInitial(d) && d[5] == 4 && ack == nil:
 			ack = d
 		case !isQUICInitial(d) && len(d) >= 20+MessageInitiationSize && hs == nil:
 			hs = d
+		case !isQUICInitial(d) && len(d) == quicHandshakeHeaderLen([]byte("SCID"))+22 && hs == nil:
+			hsAck = d
 		}
 	}
-	if ack == nil || hs == nil {
-		t.Fatalf("no Initial ACK (%v) or handshake (%v) after the flight", ack != nil, hs != nil)
+	if ack == nil || hs == nil || hsAck == nil {
+		t.Fatalf("after the flight: Initial ACK %v, Handshake ACK %v, handshake %v", ack != nil, hsAck != nil, hs != nil)
+	}
+	if hsAck[0]&0xf0 != 0xe0 || !bytes.Equal(hsAck[6:10], []byte("SCID")) {
+		t.Fatalf("Handshake ACK header % x", hsAck[:13])
+	}
+	if len(hs) > 20+MessageInitiationSize+handshakeTrailerMax {
+		t.Fatalf("handshake as a Handshake packet is %d bytes: its trailer is not kept small", len(hs))
 	}
 	dcid, _, frames, err := quicinitial.OpenWithKeys(ack, firstDCID)
 	if err != nil || !bytes.Equal(dcid, []byte("SCID")) || frames[0] != 0x02 {

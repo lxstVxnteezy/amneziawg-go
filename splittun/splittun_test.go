@@ -27,7 +27,9 @@ import (
 )
 
 func TestRouteAtCapacity(t *testing.T) {
-	d := &Device{flows: make(map[flowKey]*flow), domains: newMatcher([]string{"example.org"}), dnsSlots: make(chan struct{}, 1)}
+	d := &Device{flows: make(map[flowKey]*flow), dnsSlots: make(chan struct{}, 1)}
+	m := newMatcher([]string{"example.org"})
+	d.domains.Store(&m)
 	pkt := make([]byte, 28)
 	pkt[0], pkt[9] = 0x45, 17
 	binary.BigEndian.PutUint16(pkt[22:], 53)
@@ -408,7 +410,9 @@ func TestDomainGoesDirect(t *testing.T) {
 // A connection that started in the tunnel stays there even if its
 // address becomes direct later.
 func TestFlowsDoNotSwitchPaths(t *testing.T) {
-	d := &Device{domains: newMatcher(nil), addrs: map[netip.Addr]time.Time{}, flows: map[flowKey]*flow{}}
+	d := &Device{addrs: map[netip.Addr]time.Time{}, flows: map[flowKey]*flow{}}
+	m := newMatcher(nil)
+	d.domains.Store(&m)
 	pkt := func(flags byte) []byte {
 		p := make([]byte, 40)
 		p[0], p[9] = 0x45, 6
