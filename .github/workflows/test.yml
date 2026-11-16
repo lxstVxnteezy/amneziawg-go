@@ -1,0 +1,51 @@
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: vet
+        run: go vet ./...
+      # the race detector on Linux, where the device and splittun tests
+      # run their goroutines hardest; plain tests elsewhere
+      - name: test (race)
+        if: runner.os == 'Linux'
+        run: go test -race -count=1 ./...
+      - name: test
+        if: runner.os != 'Linux'
+        run: go test -count=1 ./...
+
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { pkg: ./device, name: FuzzDeterminePacketType }
+          - { pkg: ./device, name: FuzzObfChain }
+          - { pkg: ./quicinitial, name: FuzzParse }
+          - { pkg: ./splittun, name: FuzzDNSFromNetwork }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # code that reads what anyone can send: a short run on every change
+      - name: fuzz ${{ matrix.target.name }}
+        run: go test ${{ matrix.target.pkg }} -run '^$' -fuzz '^${{ matrix.target.name }}$' -fuzztime 60s
