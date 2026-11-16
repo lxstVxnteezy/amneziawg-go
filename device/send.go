@@ -175,6 +175,18 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	trailer := buf[padding+MessageInitiationSize:]
 	rand.Read(trailer)
 
+	if plan.await != nil {
+		// the Initial goes now, the handshake once the server has
+		// answered it (answer.go)
+		err = peer.SendBuffers(sendBuffer)
+		if err != nil {
+			peer.device.log.Errorf("%v - Failed to send I-packets: %v", peer, err)
+		}
+		peer.timersHandshakeInitiated()
+		go peer.sendWhenAnswered(plan, buf)
+		return err
+	}
+
 	sendBuffer = append(sendBuffer, buf)
 	err = peer.SendBuffers(sendBuffer)
 	if err != nil {

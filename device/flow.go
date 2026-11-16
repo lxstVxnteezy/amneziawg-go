@@ -65,6 +65,13 @@ type peerFlow struct {
 	sends       int       // handshakes sent since then (or in this attempt)
 	lastSend    time.Time // the latest of them
 	attempt     [numIPackets]ipacketAttempt
+
+	// the server's answer to the attempt's QUIC Initial (answer.go)
+	gen       uint64        // attempt number, so a late send can tell it is stale
+	answerCh  chan struct{} // closed when the answer comes; nil when not waiting
+	answered  bool          // the server answered this attempt
+	serverCID []byte        // the SCID of that answer
+	noAnswer  bool          // the last wait timed out: the server has no fallback
 }
 
 // ipacketAttempt is what one I-packet sends in the current attempt.
@@ -95,6 +102,11 @@ type handshakePlan struct {
 	ipackets [][]byte
 	junk     bool
 	backoff  uint // the retransmit timeout is shifted left by this
+
+	// await: the handshake initiation waits for the server's answer to
+	// the Initial (closed channel) or answerWait, whichever comes first
+	await <-chan struct{}
+	gen   uint64
 }
 
 // planHandshake decides what goes out before a handshake initiation.
@@ -138,6 +150,11 @@ func (peer *Peer) planHandshake() handshakePlan {
 
 	if f.sends > 0 && f.sends < maxFlightSends && f.attemptCurrent(device) {
 		f.sends++
+		if f.answered {
+			// the server answered the Initial: a QUIC client does not send
+			// it again, it goes on with the handshake alone
+			return handshakePlan{backoff: uint(f.sends - 1)}
+		}
 		var out [][]byte
 		for i := range f.attempt {
 			a := &f.attempt[i]
@@ -156,7 +173,9 @@ func (peer *Peer) planHandshake() handshakePlan {
 
 	// a new connection attempt
 	f.sends = 1
-	return handshakePlan{ipackets: peer.freshIPackets(&f.attempt), junk: true}
+	plan := handshakePlan{ipackets: peer.freshIPackets(&f.attempt), junk: true}
+	plan.await, plan.gen = f.newAttempt(device, len(plan.ipackets) > 0)
+	return plan
 }
 
 // maxRetransmitGap is twice the longest interval between two sends of one
@@ -223,5 +242,6 @@ func (peer *Peer) flowHandshakeComplete() {
 	f.completed = time.Now()
 	f.sends = 0
 	f.attempt = [numIPackets]ipacketAttempt{}
+	f.dropWait(peer.device) // a held initiation of this attempt is answered
 	f.Unlock()
 }

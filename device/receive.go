@@ -261,6 +261,17 @@ func (device *Device) RoutineReceiveIncoming(
 			default:
 				device.log.Verbosef("Received message with unknown type")
 				device.diagSource(endpoints[i], diagUnknown, size)
+				if device.flowAwaiting.Load() > 0 {
+					// perhaps the site's answer to our QUIC Initial: read
+					// its header as it came (the header protection above
+					// changed the first 4 bytes)
+					var head [64]byte
+					n := copy(head[:], bufsArrs[i][:size])
+					if cip != nil {
+						applyHash(head[:4], head[:4], typeHash)
+					}
+					device.noteQUICAnswer(endpoints[i], head[:n])
+				}
 				if _, ok := device.fallbackTarget(); ok {
 					// undo the header protection applied to the first
 					// bytes above (a XOR), so the datagram goes out as it came

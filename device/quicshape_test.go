@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
 	"github.com/amnezia-vpn/amneziawg-go/v3/conn/bindtest"
@@ -18,23 +19,31 @@ type wireBind struct {
 	conn.Bind
 	mu   sync.Mutex
 	sent [][]byte
+	at   []time.Time // when each of sent went out
 }
 
 func (b *wireBind) Send(bufs [][]byte, ep conn.Endpoint) error {
+	now := time.Now()
 	b.mu.Lock()
 	for _, buf := range bufs {
 		b.sent = append(b.sent, append([]byte(nil), buf...))
+		b.at = append(b.at, now)
 	}
 	b.mu.Unlock()
 	return b.Bind.Send(bufs, ep)
 }
 
 func (b *wireBind) take() [][]byte {
+	sent, _ := b.takeTimed()
+	return sent
+}
+
+func (b *wireBind) takeTimed() ([][]byte, []time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	s := b.sent
-	b.sent = nil
-	return s
+	s, at := b.sent, b.at
+	b.sent, b.at = nil, nil
+	return s, at
 }
 
 // awgParams is a full AWG 3.x interface: junk, S1-S4 prefixes that hold the
