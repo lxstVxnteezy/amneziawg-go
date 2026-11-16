@@ -152,8 +152,13 @@ func (peer *Peer) sendWhenAnswered(plan handshakePlan, msg *MessageInitiation) {
 		return
 	}
 	bufs := [][]byte{buf}
-	if ack != nil {
-		bufs = [][]byte{ack, buf}
+	if serverCID != nil {
+		// as Chrome: the Initial ACK, a Handshake ACK, then the Finished
+		// (here the handshake initiation)
+		bufs = [][]byte{handshakeAck(serverCID), buf}
+		if ack != nil {
+			bufs = append([][]byte{ack}, bufs...)
+		}
 	}
 	if err := peer.SendBuffers(bufs); err != nil {
 		peer.device.log.Errorf("%v - Failed to send handshake initiation: %v", peer, err)

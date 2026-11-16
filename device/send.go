@@ -182,6 +182,13 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 func (peer *Peer) initiationDatagram(msg *MessageInitiation, handshakeDCID []byte) ([]byte, error) {
 	padding := int(peer.device.paddings.init.Load())
 	trailerLen := max(peer.randomTrailer(padding+MessageInitiationSize), 0)
+	asHandshake := peer.device.quicShape.Load() && handshakeDCID != nil &&
+		padding > quicHandshakeHeaderLen(handshakeDCID)
+	if asHandshake && trailerLen > 0 {
+		// a client's Handshake Finished is ~140 bytes, not up to the
+		// largest datagram the flow has seen
+		trailerLen = int(fastrandn(handshakeTrailerMax))
+	}
 
 	buf := make([]byte, padding+MessageInitiationSize+trailerLen)
 
@@ -189,7 +196,7 @@ func (peer *Peer) initiationDatagram(msg *MessageInitiation, handshakeDCID []byt
 	rand.Read(crypt)
 	// before the header cipher takes its nonce from crypt
 	if peer.device.quicShape.Load() &&
-		(handshakeDCID == nil || !shapeQUICHandshake(crypt, handshakeDCID, len(buf))) {
+		(!asHandshake || !shapeQUICHandshake(crypt, handshakeDCID, len(buf))) {
 		shapeQUIC(crypt)
 	}
 

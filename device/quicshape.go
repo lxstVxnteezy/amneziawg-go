@@ -5,7 +5,10 @@
 
 package device
 
-import "encoding/binary"
+import (
+	"crypto/rand"
+	"encoding/binary"
+)
 
 // QUIC shape: when the device disguises its flow as QUIC, the first byte
 // of everything it sends after the I-packets (junk, handshakes, cookies,
@@ -65,6 +68,22 @@ func shapeQUICHandshake(prefix, dcid []byte, total int) bool {
 	prefix[6+len(dcid)] = 0 // SCID
 	binary.BigEndian.PutUint16(prefix[hl-2:hl], uint16(total-hl)|0x4000)
 	return true
+}
+
+// handshakeTrailerMax bounds the random trailer of a handshake initiation
+// shaped as a Handshake packet: Chrome's Handshake Finished is ~140 bytes.
+const handshakeTrailerMax = 16
+
+// handshakeAck is the small Handshake packet a QUIC client sends before
+// its Finished (35 bytes for Chrome with a 4-byte server connection ID: an
+// ACK frame and the AEAD tag): a long header to dcid and random bytes, as
+// a protected packet number and payload look. The server relays it to the
+// site, which cannot decrypt it and drops it.
+func handshakeAck(dcid []byte) []byte {
+	b := make([]byte, quicHandshakeHeaderLen(dcid)+2+4+16)
+	rand.Read(b)
+	shapeQUICHandshake(b, dcid, len(b))
+	return b
 }
 
 // isQUICInitial reports whether p starts like a QUIC v1 long header
