@@ -273,13 +273,16 @@ Retries of an unanswered attempt come after 1, 2 and 4 `RekeyTimeout` intervals 
 
 ### Junk packets
 
-The amount of junk packets specified in `Jc` with a random size between `Jmin` and `Jmax` would be generated and sent prior every handshake
+The amount of junk packets specified in `Jc` with a random size between `Jmin` and `Jmax` would be generated and sent prior every handshake. With the QUIC shape on, this fork sends them only with a new connection attempt, not with its retransmissions or with rekeys (see "One Initial per flow").
 
 - `Jc: int`, accepted range is 0–256, recommended range is 4–12
 - `Jmin: int` <= `Jmax:int`
 
 > [!TIP]
 > Junk packets do not carry any actual data, so there is no need to specify it on both sides. General recommendation is to use it on the client side only
+
+> [!NOTE]
+> With a QUIC disguise a burst of random packets right after the Initial is itself a tell: a browser is silent until the server answers. This fork still sends the junk right after the Initial of a new connection attempt (only there), so configs that send QUIC Initials should use `Jc = 0`. The panel writes it on levels with I-packets; `awg-confgen` does not yet.
 
 > [!IMPORTANT]
 > If Jmax >= system MTU (not the one specified in AWG), then the system can fracture this packet into fragments, which looks suspicious from the censor side
@@ -308,7 +311,7 @@ Values could be specified as:
 
 ### Custom signature packets
 
-These packets are being send prior to every handshake, in the same way as Junk packets do. The sending order is `I1`, `I2`, `I3`, `I4`, `I5`. If there is no value specified, the packet is skipped.
+These packets are being send prior to every handshake, in the same way as Junk packets do. With the QUIC shape on, this fork sends them with the first handshake of a flow and its retransmissions only, not with rekeys (see "One Initial per flow"). The sending order is `I1`, `I2`, `I3`, `I4`, `I5`. If there is no value specified, the packet is skipped.
 
 - `I1: string`
 - `I2: string`
@@ -336,7 +339,7 @@ I1 = <quic sni=vpn.example.com classic>
 I1 = <quic>
 ```
 
-Before every handshake the device builds a new QUIC v1 client Initial flight: a fresh connection ID, TLS random and key shares, a Chrome-like ClientHello (GREASE, shuffled extensions, X25519MLKEM768) for the domain, encrypted with the Initial keys of that connection ID as RFC 9001 requires. A post-quantum ClientHello does not fit one datagram, so the flight is two datagrams, like Chrome's; `classic` drops the post-quantum key share (older Chrome) and fits one. A fixed `<b 0x...>` Initial resends the same bytes, connection ID included, before every handshake, which a DPI that remembers Initials can notice; this one is a new connection attempt every time.
+For every new connection attempt (see "One Initial per flow"; without the QUIC shape, before every handshake) the device builds a new QUIC v1 client Initial flight: a fresh connection ID, TLS random and key shares, a Chrome-like ClientHello (GREASE, shuffled extensions, X25519MLKEM768) for the domain, encrypted with the Initial keys of that connection ID as RFC 9001 requires. A post-quantum ClientHello does not fit one datagram, so the flight is two datagrams, like Chrome's; `classic` drops the post-quantum key share (older Chrome) and fits one. A fixed `<b 0x...>` Initial resends the same bytes, connection ID included, before every handshake, which a DPI that remembers Initials can notice; this one is a new connection attempt every time, and a retry of an unanswered attempt retransmits it the way a QUIC client does (same connection ID and ClientHello, next packet numbers).
 
 - The tag must be the only one of its I-packet. Other I-packets may follow it.
 - Only the sending side needs this fork: the server never parses I-packets (it drops them, or relays them to the fallback site when one is set). amneziawg-tools passes the value through unchanged, so it works with `awg-quick` too. Official AmneziaWG clients reject the tag, so use it only in configs for clients on this fork.
