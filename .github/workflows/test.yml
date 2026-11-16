@@ -20,7 +20,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # vet on Linux: on Windows it flags upstream WireGuard code this fork
+      # does not touch (unsafe.Pointer in conn/bind_windows.go, t.Fatal from
+      # goroutines in the ipc/namedpipe tests); go test still runs its own
+      # vet subset everywhere
       - name: vet
+        if: runner.os == 'Linux'
         run: go vet ./...
       # the race detector on Linux, where the device and splittun tests
       # run their goroutines hardest; plain tests elsewhere
