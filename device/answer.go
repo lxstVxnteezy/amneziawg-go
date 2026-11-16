@@ -85,6 +85,7 @@ func (peer *Peer) flowAnswered(scid []byte, initial bool) {
 	}
 	f.answered = true
 	f.serverCID = append([]byte(nil), scid...)
+	peer.device.log.Verbosef("%v - QUIC flow: the server answered the Initial of attempt %d (server connection ID %x)", peer, f.gen, scid)
 	// the rest of the flight is still counted until the handshake goes
 	close(f.answerCh)
 	f.answerCh = nil
@@ -110,6 +111,7 @@ func (peer *Peer) afterAnswer(gen uint64, answered bool) (ok bool, serverCID, ac
 	f.dropWait(peer.device)
 	if !answered && !f.answered {
 		f.noAnswer = true
+		peer.device.log.Verbosef("%v - QUIC flow: no answer to the Initial in %v (no fallback on the server?): handshake goes now, later attempts do not wait", peer, answerWait)
 		return true, nil, nil
 	}
 	if f.serverCID == nil {
@@ -159,6 +161,9 @@ func (peer *Peer) sendWhenAnswered(plan handshakePlan, msg *MessageInitiation) {
 		if ack != nil {
 			bufs = append([][]byte{ack}, bufs...)
 		}
+	}
+	if serverCID != nil {
+		peer.device.log.Verbosef("%v - QUIC flow: sending Initial ACK %v, Handshake ACK and the handshake as a Handshake packet (%d bytes)", peer, ack != nil, len(buf))
 	}
 	if err := peer.SendBuffers(bufs); err != nil {
 		peer.device.log.Errorf("%v - Failed to send handshake initiation: %v", peer, err)

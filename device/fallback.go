@@ -70,6 +70,7 @@ func (device *Device) quietFallback(ep conn.Endpoint) {
 	f.mu.Unlock()
 	if r != nil {
 		r.quietUntil.Store(time.Now().Add(fallbackQuiet).UnixNano())
+		device.log.Verbosef("Fallback: %s made an AWG handshake, the site's packets to it stay here for %v", ep.DstToString(), fallbackQuiet)
 	}
 }
 
@@ -152,6 +153,7 @@ func (device *Device) fallbackRelay(ep conn.Endpoint, target netip.AddrPort) *fa
 		return nil
 	}
 	r := &fallbackRelay{conn: c, endpoint: ep}
+	device.log.Verbosef("Fallback: relaying %s to %v (%d relays open)", key, target, len(f.relays)+1)
 	r.lastSeen.Store(time.Now().UnixNano())
 	if f.relays == nil {
 		f.relays = make(map[string]*fallbackRelay)
