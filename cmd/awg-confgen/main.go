@@ -30,6 +30,7 @@ func main() {
 	flag.StringVar(&opts.WAN, "wan", "", "server uplink interface used for NAT (default: detected from the default route)")
 	flag.BoolVar(&opts.DisableCookies, "disable-cookies", false, "turn off the cookie mechanism (no handshake flood protection)")
 	flag.BoolVar(&opts.Fork, "fork", false, "clients run this fork: I1 = <quic sni=...>, a new QUIC Initial before every handshake (official clients reject it)")
+	flag.BoolVar(&opts.Kernel, "kernel", false, "clients use the Linux kernel module (routers, awg-quick with the module): one short QUIC Initial, which fits the module's limit on I1-I5")
 	flag.StringVar(&out, "out", "awg-configs", "output directory")
 	flag.Parse()
 

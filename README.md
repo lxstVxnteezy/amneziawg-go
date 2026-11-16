@@ -75,17 +75,25 @@ It writes `awg-configs/server/awg0.conf` and `awg-configs/clients/clientN.conf`.
 | `-disable-cookies` | off | turn off the cookie mechanism; this also removes handshake flood protection |
 | `-dns` | `1.1.1.1, 1.0.0.1` | DNS servers for clients |
 | `-fork` | off | clients run this fork: `I1 = <quic sni=...>` (or `<quic>` without SNI), a new QUIC Initial before every handshake instead of fixed bytes (official clients reject it) |
+| `-kernel` | off | clients use the Linux kernel module (routers, awg-quick with the module): one Initial with a classic ClientHello instead of Chrome's two datagrams, so I1-I5 fit the module (see below) |
 
 The configs are written with mode 0600 through a temporary file and a rename, so a rerun replaces old configs atomically and also tightens files that had broader permissions. The generator refuses an endpoint or DNS value with a line break, a port outside 1-65535 and a `-wan` that is not a plain interface name (`[a-zA-Z0-9_.@-]`, up to 15 characters), because those values end up in the config and in the server's PostUp/PostDown commands.
 
 Each client gets its own I-packets: a real QUIC v1 Initial carrying a Chrome-like TLS ClientHello (GREASE, X25519MLKEM768, shuffled extensions), split across I1 and I2 the way Chrome splits it. The server config has no I-packets, because they are client Initials and the receiving side ignores them anyway.
 
+The Linux kernel module takes the whole device in one netlink message of a page, which leaves about 3.4 KB for I1-I5. The two-datagram flight is about 5 KB of hex: awg-quick brings the interface up, `awg show` prints "Message too long" and nothing passes. `-kernel` writes one Initial with a classic ClientHello (no post-quantum key share, like Chrome before 124), about 2.5 KB. Phones, Windows and amneziawg-go do not need it.
+
+Other choices the generator makes:
+
+- `Jc = 0`: every flow starts with a QUIC Initial, and a browser is silent after it until the server answers, so a burst of junk there is a tell. Jmin and Jmax stay in the config, unused.
+- H1-H4 are narrow ranges, at most 50 000 values each and all at or below 2^31-1 (old AmneziaWG for Android and wg-easy read them as signed). Header protection encrypts the type field, so the width hides nothing on the wire. With `RandomTrailers` the receiver no longer checks the exact size of handshakes and tries every transport packet against H1-H3; bytes that fall inside a range get the packet dropped, about (W1+W2+W3)/2^32 of the traffic. Ranges 10 million wide lost up to 0.7 %; these lose under 0.004 %.
+
 Pick the SNI so that it resolves to the server: a DPI can compare the SNI of a QUIC Initial with the destination IP, and `www.google.com` on a VPS address is easy to flag. Point a domain of yours at the server and pass it as `-endpoint` (it becomes the SNI) or as `-sni`. With an IP endpoint and no `-sni` the I-packets carry no SNI at all, as a browser connecting to an IP address does (TLS does not allow an IP in SNI), and the generator prints a warning. A borrowed popular domain is worse than none: it does not resolve to the server.
 
 Known limitations:
 
-- Without `-fork`, I-packets are fixed bytes, so the same client sends the same Initial before every handshake (every few minutes). A DPI that remembers Initials can notice the repeats. With `-fork` the client builds a new one each time (see "Generated QUIC Initials").
-- After the Initial, the traffic on the same flow does not look like QUIC: with header protection the first byte is random, so about half the packets break the QUIC short-header fixed bit.
+- Without `-fork`, I-packets are fixed bytes, so the same client sends the same Initial again and again (official clients before every handshake, every couple of minutes). A DPI that remembers Initials can notice the repeats. With `-fork` the client builds a new one for each connection attempt (see "Generated QUIC Initials").
+- With official clients and servers, the traffic after the Initial does not look like QUIC: with header protection the first byte is random, so about half the packets break the QUIC short-header fixed bit. This fork shapes it on both sides (see "QUIC shape of packets").
 - Clients route `::/0` into the tunnel but the server has no IPv6. IPv6 is blackholed on purpose so it does not leak past the tunnel.
 
 ## Configuration
@@ -282,7 +290,7 @@ The amount of junk packets specified in `Jc` with a random size between `Jmin` a
 > Junk packets do not carry any actual data, so there is no need to specify it on both sides. General recommendation is to use it on the client side only
 
 > [!NOTE]
-> With a QUIC disguise a burst of random packets right after the Initial is itself a tell: a browser is silent until the server answers. This fork still sends the junk right after the Initial of a new connection attempt (only there), so configs that send QUIC Initials should use `Jc = 0`. The panel writes it on levels with I-packets; `awg-confgen` does not yet.
+> With a QUIC disguise a burst of random packets right after the Initial is itself a tell: a browser is silent until the server answers. This fork still sends the junk right after the Initial of a new connection attempt (only there), so configs that send QUIC Initials should use `Jc = 0`. The panel and `awg-confgen` write it on levels with I-packets.
 
 > [!IMPORTANT]
 > If Jmax >= system MTU (not the one specified in AWG), then the system can fracture this packet into fragments, which looks suspicious from the censor side

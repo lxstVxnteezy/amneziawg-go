@@ -36,6 +36,12 @@ type Options struct {
 	// fresh QUIC Initial flight before every handshake instead of resending
 	// fixed bytes. Official AmneziaWG clients reject the tag.
 	Fork bool
+
+	// Kernel gives official clients one Initial with a classic ClientHello
+	// instead of Chrome's two-datagram flight, for clients on the Linux
+	// kernel module (routers, awg-quick with the module): the module takes
+	// I1-I5 only up to about 3.4 KB, the full flight is about 5 KB.
+	Kernel bool
 }
 
 type keyPair struct {
@@ -151,14 +157,25 @@ func newKeyPair() keyPair {
 	}
 }
 
-// headerRanges returns four disjoint random H ranges that avoid the vanilla
-// WireGuard message types 1-4.
+// maxHeader is the largest H value written: some clients read H1-H4 as
+// signed 32-bit numbers (AmneziaWG for Android before 2.0.2, wg-easy).
+const maxHeader = 1<<31 - 1
+
+// maxHeaderWidth bounds each H range. Header protection encrypts the type
+// field, so the width hides nothing on the wire, and with RandomTrailers
+// the receiver tries every transport packet against H1-H3 and drops the
+// ones whose (random) bytes land inside: about (W1+W2+W3)/2^32 of the
+// traffic. 50 000 keeps that under 0.004 %.
+const maxHeaderWidth = 50_000
+
+// headerRanges returns four disjoint narrow random H ranges that avoid
+// the vanilla WireGuard message types 1-4.
 func headerRanges() [4]string {
 	type rng struct{ lo, hi uint64 }
 	var picked []rng
 	for len(picked) < 4 {
-		width := uint64(randInt(100_000, 10_000_000))
-		lo := uint64(randInt(1<<20, (1<<32)-1-10_000_000))
+		width := uint64(randInt(maxHeaderWidth/10, maxHeaderWidth))
+		lo := uint64(randInt(1<<20, maxHeader-maxHeaderWidth))
 		r := rng{lo, lo + width}
 		ok := true
 		for _, p := range picked {
@@ -181,7 +198,10 @@ func headerRanges() [4]string {
 func newObfuscation() Obfuscation {
 	var o Obfuscation
 
-	o.Jc = randInt(3, 6)
+	// Every config starts its flow with a QUIC Initial, after which a
+	// browser is silent until the server answers: a burst of junk right
+	// after the Initial is a tell of its own.
+	o.Jc = 0
 	o.Jmin = randInt(40, 100)
 	o.Jmax = o.Jmin + randInt(100, 500)
 
@@ -205,8 +225,8 @@ func newObfuscation() Obfuscation {
 	return o
 }
 
-func iPackets(sni string) ([]string, error) {
-	initials, err := quicinitial.Flight(sni, quicinitial.Options{})
+func iPackets(sni string, classic bool) ([]string, error) {
+	initials, err := quicinitial.Flight(sni, quicinitial.Options{Classic: classic})
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +306,7 @@ func Generate(opts Options) (*Bundle, error) {
 		}
 		if !opts.Fork {
 			var err error
-			if ipk, err = iPackets(opts.SNI); err != nil {
+			if ipk, err = iPackets(opts.SNI, opts.Kernel); err != nil {
 				return nil, err
 			}
 		}
