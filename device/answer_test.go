@@ -7,11 +7,14 @@ package device
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/amnezia-vpn/amneziawg-go/v3/quicinitial"
 )
 
 // siteAnswer is the start of a server's Initial: QUIC v1 long header,
@@ -76,7 +79,9 @@ func TestHandshakeWaitsForTheAnswer(t *testing.T) {
 	pair.Send(t, Pong, nil) // the client starts the handshake
 	pair.Send(t, Ping, nil)
 
-	sent := rec[0].sent
+	rec[0].mu.Lock()
+	sent := append([][]byte(nil), rec[0].sent...)
+	rec[0].mu.Unlock()
 	wait := handshakeAfterInitial(t, rec[0])
 	peer := pair[0].dev.LookupPeer(pair[1].dev.staticIdentity.publicKey)
 	peer.flow.Lock()
@@ -95,6 +100,68 @@ func TestHandshakeWaitsForTheAnswer(t *testing.T) {
 	}
 	if pair[0].dev.flowAwaiting.Load() != 0 {
 		t.Fatal("still waiting after the answer")
+	}
+
+	// on the wire: the Initial flight; an Initial that ACKs the server's,
+	// to its connection ID, sealed with the first DCID's keys; then the
+	// handshake as one QUIC Handshake packet to the same connection ID
+	firstDCID := sent[0][6 : 6+sent[0][5]]
+	var ack, hs []byte
+	for _, d := range sent[1:] {
+		switch {
+		case isQUICInitial(d) && d[5] == 4 && ack == nil:
+			ack = d
+		case !isQUICInitial(d) && len(d) >= 20+MessageInitiationSize && hs == nil:
+			hs = d
+		}
+	}
+	if ack == nil || hs == nil {
+		t.Fatalf("no Initial ACK (%v) or handshake (%v) after the flight", ack != nil, hs != nil)
+	}
+	dcid, _, frames, err := quicinitial.OpenWithKeys(ack, firstDCID)
+	if err != nil || !bytes.Equal(dcid, []byte("SCID")) || frames[0] != 0x02 {
+		t.Fatalf("Initial ACK: dcid %q, first frame %#x, err %v", dcid, frames[0], err)
+	}
+	hl := quicHandshakeHeaderLen(cid)
+	if hs[0]&0xf0 != 0xe0 || !bytes.Equal(hs[1:5], []byte{0, 0, 0, 1}) || hs[5] != 4 ||
+		!bytes.Equal(hs[6:10], []byte("SCID")) || hs[10] != 0 ||
+		int(binary.BigEndian.Uint16(hs[hl-2:hl])&0x3fff) != len(hs)-hl {
+		t.Fatalf("handshake does not read as a QUIC Handshake packet to SCID: % x", hs[:hl])
+	}
+
+	// data: short header packets to the server's connection ID
+	rec[0].take()
+	for range 10 {
+		pair.Send(t, Pong, nil)
+		pair.Send(t, Ping, nil)
+	}
+	data := 0
+	for _, d := range rec[0].take() {
+		if !shaped(d) {
+			t.Fatalf("client datagram of %d bytes not shaped: %#x", len(d), d[0])
+		}
+		if !bytes.Equal(d[1:5], []byte("SCID")) {
+			t.Fatalf("data packet without the server's connection ID: % x", d[:8])
+		}
+		data++
+	}
+	if data < 10 {
+		t.Fatalf("only %d data packets", data)
+	}
+}
+
+// A Handshake header needs room in the S1 prefix: a short prefix keeps
+// the short header shape.
+func TestShapeQUICHandshake(t *testing.T) {
+	prefix := make([]byte, 20)
+	if !shapeQUICHandshake(prefix, []byte("SCID"), 300) {
+		t.Fatal("20-byte prefix refused for a 4-byte DCID")
+	}
+	if prefix[0]&0xf0 != 0xe0 || binary.BigEndian.Uint16(prefix[11:13]) != uint16(300-13)|0x4000 {
+		t.Fatalf("header % x", prefix[:13])
+	}
+	if shapeQUICHandshake(make([]byte, 13), []byte("SCID"), 300) {
+		t.Fatal("a prefix with no room for a packet number byte accepted")
 	}
 }
 

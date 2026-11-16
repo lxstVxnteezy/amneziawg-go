@@ -30,6 +30,13 @@ import (
 //
 // Only the client changes; the server is any AWG server.
 
+// maxDataCID is the longest server connection ID that transport packets
+// carry. Their prefix is also the header protection nonce (12 bytes), and
+// a constant CID in it leaves 6 bits of the first byte plus the bytes
+// after the CID random: 4 bytes (quic-go, Caddy) leave 62 bits, an 8-byte
+// CID would leave 30, too few for millions of packets.
+const maxDataCID = 4
+
 // answerWait is how long a new attempt holds its handshake initiation
 // for the server's answer. It is paid once on a server without fallback.
 const answerWait = time.Second
@@ -42,69 +49,113 @@ func (f *peerFlow) newAttempt(device *Device, waitForAnswer bool) (<-chan struct
 	f.gen++
 	f.answered = false
 	f.serverCID = nil
+	f.initials = 0
 	if !waitForAnswer || !device.quicShape.Load() || f.noAnswer {
 		return nil, f.gen
 	}
 	f.answerCh = make(chan struct{})
+	f.listening = true
 	device.flowAwaiting.Add(1)
 	return f.answerCh, f.gen
 }
 
-// dropWait stops waiting for an answer (f locked).
+// dropWait stops waiting for an answer and noting its packets (f locked).
 func (f *peerFlow) dropWait(device *Device) {
-	if f.answerCh != nil {
-		f.answerCh = nil
+	f.answerCh = nil
+	if f.listening {
+		f.listening = false
 		device.flowAwaiting.Add(-1)
 	}
 }
 
 // flowAnswered records the server's answer to the current attempt.
-func (peer *Peer) flowAnswered(scid []byte) {
+func (peer *Peer) flowAnswered(scid []byte, initial bool) {
 	f := &peer.flow
 	f.Lock()
 	defer f.Unlock()
 	f.noAnswer = false
-	if f.answerCh == nil || f.answered {
+	if !f.listening {
+		return
+	}
+	if initial {
+		f.initials++
+	}
+	if f.answered {
 		return
 	}
 	f.answered = true
 	f.serverCID = append([]byte(nil), scid...)
+	// the rest of the flight is still counted until the handshake goes
 	close(f.answerCh)
-	f.dropWait(peer.device)
+	f.answerCh = nil
 }
 
-// attemptStillCurrent tells a held handshake initiation whether to go
-// out: not when a newer attempt began. A wait that timed out marks the
-// server as one that does not answer.
-func (peer *Peer) attemptStillCurrent(gen uint64, answered bool) bool {
+// answerSettle lets the rest of the server's first flight (its second
+// Initial, the Handshake packets) arrive before the client answers it, as
+// a client acknowledges the flight and not its first datagram.
+const answerSettle = 3 * time.Millisecond
+
+// afterAnswer is what a held handshake initiation needs once the wait is
+// over: whether to go out at all (not when a newer attempt began), and,
+// when the server answered, its connection ID and the client's Initial
+// that acknowledges the server's Initials. A wait that timed out marks
+// the server as one that does not answer.
+func (peer *Peer) afterAnswer(gen uint64, answered bool) (ok bool, serverCID, ack []byte) {
 	f := &peer.flow
 	f.Lock()
 	defer f.Unlock()
 	if f.gen != gen {
-		return false
+		return false, nil, nil
 	}
+	f.dropWait(peer.device)
 	if !answered && !f.answered {
 		f.noAnswer = true
-		f.dropWait(peer.device)
+		return true, nil, nil
 	}
-	return true
+	if f.serverCID == nil {
+		return true, nil, nil
+	}
+	for i := range f.attempt {
+		if q := f.attempt[i].quic; q != nil {
+			a, err := q.Ack(f.serverCID, uint64(max(f.initials, 1)-1))
+			if err != nil {
+				peer.device.log.Errorf("%v - Failed to build the Initial ACK: %v", peer, err)
+				break
+			}
+			ack = a
+			break
+		}
+	}
+	return true, f.serverCID, ack
 }
 
 // sendWhenAnswered sends a held handshake initiation once the server has
-// answered the Initial, or after answerWait.
-func (peer *Peer) sendWhenAnswered(plan handshakePlan, buf []byte) {
+// answered the Initial (as a QUIC client goes on: an Initial with the ACK,
+// then the handshake as a Handshake packet), or after answerWait.
+func (peer *Peer) sendWhenAnswered(plan handshakePlan, msg *MessageInitiation) {
 	t := time.NewTimer(answerWait)
 	defer t.Stop()
 	answered := true
 	select {
 	case <-plan.await:
+		time.Sleep(answerSettle)
 	case <-t.C:
 		answered = false
 	}
-	if !peer.attemptStillCurrent(plan.gen, answered) || !peer.isRunning.Load() {
+	ok, serverCID, ack := peer.afterAnswer(plan.gen, answered)
+	if !ok || !peer.isRunning.Load() {
 		return
 	}
-	if err := peer.SendBuffers([][]byte{buf}); err != nil {
+	buf, err := peer.initiationDatagram(msg, serverCID)
+	if err != nil {
+		peer.device.log.Errorf("%v - Failed to build handshake initiation: %v", peer, err)
+		return
+	}
+	bufs := [][]byte{buf}
+	if ack != nil {
+		bufs = [][]byte{ack, buf}
+	}
+	if err := peer.SendBuffers(bufs); err != nil {
 		peer.device.log.Errorf("%v - Failed to send handshake initiation: %v", peer, err)
 	}
 }
@@ -147,7 +198,7 @@ func (device *Device) noteQUICAnswer(ep conn.Endpoint, head []byte) {
 	device.peers.RLock()
 	for _, peer := range device.peers.keyMap {
 		peer.flow.Lock()
-		w := peer.flow.answerCh != nil
+		w := peer.flow.listening
 		peer.flow.Unlock()
 		if !w {
 			continue
@@ -164,6 +215,6 @@ func (device *Device) noteQUICAnswer(ep conn.Endpoint, head []byte) {
 		matched = waiting
 	}
 	for _, peer := range matched {
-		peer.flowAnswered(scid)
+		peer.flowAnswered(scid, head[0]&0x30 == 0)
 	}
 }

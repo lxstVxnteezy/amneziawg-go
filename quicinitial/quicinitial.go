@@ -120,13 +120,15 @@ func appendVarint(b []byte, v uint64) []byte {
 }
 
 // sealInitial protects an Initial packet whose frames are already padded.
-// pn is encoded on 4 bytes.
-func sealInitial(dcid, scid []byte, pn uint32, frames []byte) ([]byte, error) {
+// pn is encoded on 4 bytes. The keys come from keyDCID, the connection ID
+// of the client's first Initial, for the whole connection (RFC 9001,
+// section 5.2), whatever DCID the packet carries.
+func sealInitial(keyDCID, dcid, scid []byte, pn uint32, frames []byte) ([]byte, error) {
 	if len(dcid) > 20 || len(scid) > 20 {
 		return nil, errors.New("connection ID too long")
 	}
 	const pnLen = 4
-	k := clientInitialKeys(dcid)
+	k := clientInitialKeys(keyDCID)
 
 	hdr := []byte{0xc0 | (pnLen - 1)} // long header, Initial, 4-byte PN
 	hdr = binary.BigEndian.AppendUint32(hdr, 1)
@@ -401,7 +403,7 @@ func (a *Attempt) Flight() ([][]byte, error) {
 		chunk := a.hello[offset:min(offset+room, len(a.hello))]
 		frames := cryptoFrame(offset, chunk)
 		frames = append(frames, make([]byte, initialDatagram-headerLen-16-len(frames))...) // PADDING
-		p, err := sealInitial(a.dcid, nil, a.pn+uint32(len(out)), frames)
+		p, err := sealInitial(a.dcid, a.dcid, nil, a.pn+uint32(len(out)), frames)
 		if err != nil {
 			return nil, err
 		}
@@ -412,4 +414,28 @@ func (a *Attempt) Flight() ([][]byte, error) {
 	}
 	a.pn += uint32(len(out))
 	return out, nil
+}
+
+// Ack returns the Initial a client sends once the server has answered: an
+// ACK of the server's Initial packets 0..largest, to the connection ID the
+// server chose (serverCID), padded to a full 1250-byte datagram like
+// Chrome's. Its keys are still those of the attempt's first DCID, so a
+// middlebox that decrypts Initials reads a valid ACK. Its packet number
+// follows the attempt's Initials.
+func (a *Attempt) Ack(serverCID []byte, largest uint64) ([]byte, error) {
+	frames := []byte{0x02}                                  // ACK
+	frames = appendVarint(frames, largest)                 // largest acknowledged
+	frames = appendVarint(frames, uint64(randInt(0, 400))) // ACK delay
+	frames = appendVarint(frames, 0)                       // no further ranges
+	frames = appendVarint(frames, largest)                 // first range: 0..largest
+	headerLen := 1 + 4 + 1 + len(serverCID) + 1 + 1 + 2 + 4
+	if pad := initialDatagram - headerLen - 16 - len(frames); pad > 0 {
+		frames = append(frames, make([]byte, pad)...) // PADDING
+	}
+	p, err := sealInitial(a.dcid, serverCID, nil, a.pn, frames)
+	if err != nil {
+		return nil, err
+	}
+	a.pn++
+	return p, nil
 }

@@ -50,7 +50,7 @@ func TestSealInitialRFC9001(t *testing.T) {
 	frames = append(frames, make([]byte, 1162-len(frames))...)
 	want := readHex(t, "rfc9001_a2_packet.hex")
 
-	got, err := sealInitial(mustHex(t, rfcDCID), nil, 2, frames)
+	got, err := sealInitial(mustHex(t, rfcDCID), mustHex(t, rfcDCID), nil, 2, frames)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,4 +290,50 @@ func FuzzParse(f *testing.F) {
 		ParseClientHello(a)
 		CryptoData(b)
 	})
+}
+
+// After the server's answer the client ACKs its Initials: a full-size
+// Initial to the server's connection ID, sealed with the keys of the first
+// DCID (what a middlebox that saw the first flight uses), carrying an ACK
+// of 0..largest and padding; its packet number follows the flight's.
+func TestAttemptAck(t *testing.T) {
+	a, err := NewAttempt("vk.com", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flight, err := a.Flight()
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverCID := []byte{0xaa, 0xbb, 0xcc, 0xdd}
+	ack, err := a.Ack(serverCID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ack) != initialDatagram {
+		t.Fatalf("ACK datagram %d bytes, want %d", len(ack), initialDatagram)
+	}
+	dcid, pn, frames, err := OpenWithKeys(ack, a.dcid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(dcid, serverCID) || pn != uint32(len(flight)) {
+		t.Fatalf("DCID %x pn %d, want %x and %d", dcid, pn, serverCID, len(flight))
+	}
+	// ACK: largest 1, any delay, no extra ranges, first range 1 (0..1)
+	if frames[0] != 0x02 || frames[1] != 1 {
+		t.Fatalf("not an ACK of 0..1: % x", frames[:8])
+	}
+	_, n := readVarint(frames[2:])
+	if frames[2+n] != 0 || frames[3+n] != 1 {
+		t.Fatalf("ACK ranges: % x", frames[2+n:4+n])
+	}
+	for _, b := range frames[4+n:] {
+		if b != 0 {
+			t.Fatal("anything after the ACK but PADDING")
+		}
+	}
+	if _, _, _, err := Open(ack); err == nil {
+		t.Fatal("the ACK opens with keys from its own DCID: it must use the first DCID's")
+	}
 }

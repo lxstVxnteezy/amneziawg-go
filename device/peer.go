@@ -26,6 +26,9 @@ type Peer struct {
 	rxBytes           atomic.Uint64  // bytes received from peer
 	lastHandshakeNano atomic.Int64   // nano seconds since epoch
 	flow              peerFlow       // see flow.go
+	// quicDCID: the server's connection ID that transport packets carry
+	// after the short header byte (answer.go); nil: none
+	quicDCID atomic.Pointer[[]byte]
 
 	endpoint struct {
 		sync.Mutex

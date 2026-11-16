@@ -69,8 +69,10 @@ type peerFlow struct {
 	// the server's answer to the attempt's QUIC Initial (answer.go)
 	gen       uint64        // attempt number, so a late send can tell it is stale
 	answerCh  chan struct{} // closed when the answer comes; nil when not waiting
+	listening bool          // counted in device.flowAwaiting: answers are noted
 	answered  bool          // the server answered this attempt
 	serverCID []byte        // the SCID of that answer
+	initials  int           // server Initial packets seen in it
 	noAnswer  bool          // the last wait timed out: the server has no fallback
 }
 
@@ -107,6 +109,9 @@ type handshakePlan struct {
 	// the Initial (closed channel) or answerWait, whichever comes first
 	await <-chan struct{}
 	gen   uint64
+	// handshakeDCID: the server answered, the initiation goes as a QUIC
+	// Handshake packet to this connection ID
+	handshakeDCID []byte
 }
 
 // planHandshake decides what goes out before a handshake initiation.
@@ -153,7 +158,7 @@ func (peer *Peer) planHandshake() handshakePlan {
 		if f.answered {
 			// the server answered the Initial: a QUIC client does not send
 			// it again, it goes on with the handshake alone
-			return handshakePlan{backoff: uint(f.sends - 1)}
+			return handshakePlan{backoff: uint(f.sends - 1), handshakeDCID: f.serverCID}
 		}
 		var out [][]byte
 		for i := range f.attempt {
@@ -175,6 +180,7 @@ func (peer *Peer) planHandshake() handshakePlan {
 	f.sends = 1
 	plan := handshakePlan{ipackets: peer.freshIPackets(&f.attempt), junk: true}
 	plan.await, plan.gen = f.newAttempt(device, len(plan.ipackets) > 0)
+	peer.quicDCID.Store(nil) // a new connection; its server picks a new ID
 	return plan
 }
 
@@ -243,5 +249,9 @@ func (peer *Peer) flowHandshakeComplete() {
 	f.sends = 0
 	f.attempt = [numIPackets]ipacketAttempt{}
 	f.dropWait(peer.device) // a held initiation of this attempt is answered
+	if n := len(f.serverCID); n > 0 && n <= maxDataCID {
+		cid := append([]byte(nil), f.serverCID...)
+		peer.quicDCID.Store(&cid)
+	}
 	f.Unlock()
 }

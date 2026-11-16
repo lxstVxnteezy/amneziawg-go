@@ -451,6 +451,9 @@ func (device *Device) RoutineHandshake(id int) {
 				goto skip
 			}
 			peer.diagInit()
+			// the client is ours: what the fallback site still sends it
+			// (retransmissions of a handshake it never finishes) stays here
+			device.quietFallback(elem.endpoint)
 
 			// update timers
 

@@ -46,6 +46,31 @@ type fallbackRelay struct {
 	conn     *net.UDPConn
 	endpoint conn.Endpoint
 	lastSeen atomic.Int64 // unix nanoseconds
+	// quietUntil: the site's answers are dropped until then (unix
+	// nanoseconds), see quietFallback
+	quietUntil atomic.Int64
+}
+
+// fallbackQuiet is how long the site's answers to a client stay on the
+// server once the client has made an AWG handshake. The client answered
+// the site's Initial but never finishes TLS, so the site retransmits its
+// Handshake flight until its handshake timeout (5 s in quic-go, Caddy's
+// QUIC stack): a tail a real client would have stopped with its ACKs.
+// After the window a new Initial from that address is answered again.
+const fallbackQuiet = 10 * time.Second
+
+// quietFallback stops relaying the site's answers to ep for fallbackQuiet.
+func (device *Device) quietFallback(ep conn.Endpoint) {
+	if ep == nil {
+		return
+	}
+	f := &device.fallback
+	f.mu.Lock()
+	r := f.relays[ep.DstToString()]
+	f.mu.Unlock()
+	if r != nil {
+		r.quietUntil.Store(time.Now().Add(fallbackQuiet).UnixNano())
+	}
 }
 
 // SetFallback enables relaying to target, or disables it for an invalid
@@ -161,7 +186,11 @@ func (device *Device) runFallbackRelay(key string, r *fallbackRelay) {
 			}
 			return
 		}
-		r.lastSeen.Store(time.Now().UnixNano())
+		now := time.Now().UnixNano()
+		r.lastSeen.Store(now)
+		if now < r.quietUntil.Load() {
+			continue // the client is ours and done with the site
+		}
 
 		device.net.RLock()
 		bind := device.net.bind

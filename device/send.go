@@ -145,35 +145,8 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 		sendBuffer = append(sendBuffer, peer.device.JunkPackets()...)
 	}
 
-	padding := int(peer.device.paddings.init.Load())
-	trailerLen := max(peer.randomTrailer(padding+MessageInitiationSize), 0)
-
-	buf := make([]byte, padding+MessageInitiationSize+trailerLen)
-
-	crypt := buf[:padding]
-	rand.Read(crypt)
-	if peer.device.quicShape.Load() {
-		shapeQUIC(crypt) // before the header cipher takes its nonce from crypt
-	}
-
-	writer := bytes.NewBuffer(buf[padding:padding])
-	binary.Write(writer, binary.LittleEndian, msg)
-	packet := writer.Bytes()
-	peer.cookieGenerator.AddMacs(packet)
-
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
-
-	cip, err := peer.device.HeaderProtectionCipher(crypt[:HeaderCipherNonceSize])
-	if err != nil {
-		return err
-	}
-	if cip != nil {
-		cip.XORKeyStream(packet, packet)
-	}
-
-	trailer := buf[padding+MessageInitiationSize:]
-	rand.Read(trailer)
 
 	if plan.await != nil {
 		// the Initial goes now, the handshake once the server has
@@ -183,10 +156,14 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 			peer.device.log.Errorf("%v - Failed to send I-packets: %v", peer, err)
 		}
 		peer.timersHandshakeInitiated()
-		go peer.sendWhenAnswered(plan, buf)
+		go peer.sendWhenAnswered(plan, msg)
 		return err
 	}
 
+	buf, err := peer.initiationDatagram(msg, plan.handshakeDCID)
+	if err != nil {
+		return err
+	}
 	sendBuffer = append(sendBuffer, buf)
 	err = peer.SendBuffers(sendBuffer)
 	if err != nil {
@@ -195,6 +172,43 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	peer.timersHandshakeInitiated()
 
 	return err
+}
+
+// initiationDatagram puts a handshake initiation on the wire format: the
+// S1 prefix, MACs, header protection, the random trailer. With the QUIC
+// shape the prefix starts like a short header, or, given the server's
+// connection ID (handshakeDCID, a connection whose server answered the
+// Initial), like a QUIC Handshake packet.
+func (peer *Peer) initiationDatagram(msg *MessageInitiation, handshakeDCID []byte) ([]byte, error) {
+	padding := int(peer.device.paddings.init.Load())
+	trailerLen := max(peer.randomTrailer(padding+MessageInitiationSize), 0)
+
+	buf := make([]byte, padding+MessageInitiationSize+trailerLen)
+
+	crypt := buf[:padding]
+	rand.Read(crypt)
+	// before the header cipher takes its nonce from crypt
+	if peer.device.quicShape.Load() &&
+		(handshakeDCID == nil || !shapeQUICHandshake(crypt, handshakeDCID, len(buf))) {
+		shapeQUIC(crypt)
+	}
+
+	writer := bytes.NewBuffer(buf[padding:padding])
+	binary.Write(writer, binary.LittleEndian, msg)
+	packet := writer.Bytes()
+	peer.cookieGenerator.AddMacs(packet)
+
+	cip, err := peer.device.HeaderProtectionCipher(crypt[:HeaderCipherNonceSize])
+	if err != nil {
+		return nil, err
+	}
+	if cip != nil {
+		cip.XORKeyStream(packet, packet)
+	}
+
+	trailer := buf[padding+MessageInitiationSize:]
+	rand.Read(trailer)
+	return buf, nil
 }
 
 func (peer *Peer) SendHandshakeResponse() error {
@@ -654,7 +668,11 @@ func (device *Device) RoutineEncryption(id int) {
 			crypt := elem.buffer[:elem.padding]
 			prng.Read(crypt)
 			if device.quicShape.Load() {
-				shapeQUIC(crypt) // before the header cipher takes its nonce from crypt
+				// before the header cipher takes its nonce from crypt
+				shapeQUIC(crypt)
+				if dcid := elem.peer.quicDCID.Load(); dcid != nil && len(crypt) > len(*dcid) {
+					copy(crypt[1:], *dcid) // a 1-RTT packet to the server's connection ID
+				}
 			}
 
 			// populate header fields
