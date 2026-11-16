@@ -145,3 +145,45 @@ func TestFallbackRejectsBadTarget(t *testing.T) {
 		t.Fatal("bad fallback accepted")
 	}
 }
+
+// Once a client has made an AWG handshake, the site's late answers to its
+// address (retransmissions of a handshake the client never finishes) stay
+// on the server; other addresses are still answered.
+func TestFallbackQuietAfterHandshake(t *testing.T) {
+	pair := genTestPair(t, true)
+	dev := pair[0].dev
+	target, _ := echoServer(t)
+	dev.SetFallback(target)
+
+	c, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: int(dev.net.port)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ask := func() []byte {
+		if _, err := c.Write([]byte("hello?")); err != nil {
+			t.Fatal(err)
+		}
+		c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		buf := make([]byte, 1500)
+		n, err := c.Read(buf)
+		if err != nil {
+			return nil
+		}
+		return buf[:n]
+	}
+	if ask() == nil {
+		t.Fatal("no answer before the handshake")
+	}
+	ep, err := dev.net.bind.ParseEndpoint(c.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev.quietFallback(ep)
+	if got := ask(); got != nil {
+		t.Fatalf("the site still answers a client that made a handshake: %q", got)
+	}
+	if probe(t, dev.net.port, []byte("hello?"), 2*time.Second) == nil {
+		t.Fatal("another address is no longer answered")
+	}
+}

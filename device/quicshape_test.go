@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
 	"github.com/amnezia-vpn/amneziawg-go/v3/conn/bindtest"
@@ -18,23 +19,31 @@ type wireBind struct {
 	conn.Bind
 	mu   sync.Mutex
 	sent [][]byte
+	at   []time.Time // when each of sent went out
 }
 
 func (b *wireBind) Send(bufs [][]byte, ep conn.Endpoint) error {
+	now := time.Now()
 	b.mu.Lock()
 	for _, buf := range bufs {
 		b.sent = append(b.sent, append([]byte(nil), buf...))
+		b.at = append(b.at, now)
 	}
 	b.mu.Unlock()
 	return b.Bind.Send(bufs, ep)
 }
 
 func (b *wireBind) take() [][]byte {
+	sent, _ := b.takeTimed()
+	return sent
+}
+
+func (b *wireBind) takeTimed() ([][]byte, []time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	s := b.sent
-	b.sent = nil
-	return s
+	s, at := b.sent, b.at
+	b.sent, b.at = nil, nil
+	return s, at
 }
 
 // awgParams is a full AWG 3.x interface: junk, S1-S4 prefixes that hold the
@@ -264,5 +273,30 @@ func TestShapeQUICAndIsQUICInitial(t *testing.T) {
 		if isQUICInitial(p) {
 			t.Fatalf("%x taken for a QUIC Initial", p)
 		}
+	}
+}
+
+// With the QUIC shape, small inner packets (ACKs, keepalives) skip the
+// content padding: a QUIC client's ACKs are 30-45 bytes. A device without
+// the shape pads them as before. The tunnel keeps working both ways.
+func TestQUICShapeSmallPacketsUnpadded(t *testing.T) {
+	pad := []string{"content_padding_addition", "40-60"}
+	pair, rec := wirePair(t, [2][]string{append([]string{"i1", "<quic sni=vpn.example.com>"}, pad...), pad})
+	traffic(t, pair)
+	// a 32-byte ICMP echo + 32 bytes of header and tag + S4 (16)
+	const lo, hi = 32 + MinMessageSize + 16, 32 + MinMessageSize + 16 + smallPacketJitter
+	count := func(sent [][]byte) (small int) {
+		for _, d := range sent {
+			if len(d) >= lo && len(d) < hi {
+				small++
+			}
+		}
+		return small
+	}
+	if n := count(rec[0].take()); n < 40 {
+		t.Fatalf("shaped client sent %d datagrams of %d-%d bytes, want its ~100 pings unpadded", n, lo, hi-1)
+	}
+	if n := count(rec[1].take()); n != 0 {
+		t.Fatalf("server without the shape sent %d unpadded datagrams", n)
 	}
 }

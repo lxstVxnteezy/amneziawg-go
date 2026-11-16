@@ -264,7 +264,7 @@ When the disguise is QUIC, the fork makes the first byte of junk, handshake, coo
 
 Nothing else changes on the wire and the receiver never reads these bits, so a shaping side works with any peer, official or fork. With an S prefix of 0 (AWG 1.x levels) there is nothing to shape. Two of the 96 bits of the header protection nonce become fixed; 94 stay random.
 
-This removes the cheapest tell, not every one: the server still does not answer the Initial the way an HTTP/3 server would, and a stateful parser can notice that.
+This removes the cheapest tell, not every one: without a fallback the server does not answer the Initial the way an HTTP/3 server would, and a stateful parser can notice that. With a fallback see "After the server's answer" below.
 
 ### One Initial per flow [client-side, this fork, automatic]
 
@@ -280,6 +280,27 @@ AmneziaWG sends the I-packets and junk before every handshake: at every rekey (e
 Only the sender changes, so this works with any server, official or fork; servers never needed the I-packets. Without the QUIC shape every handshake carries the I-packets and junk as before. A fixed `<b 0x...>` Initial is resent byte for byte, packet number included; `<quic>` is the one that looks like a real retransmission.
 
 Retries of an unanswered attempt come after 1, 2 and 4 `RekeyTimeout` intervals instead of 1, 1, 1, so a client whose server is unreachable gives up (`MaxHandshakeAttempts`) about twice as late and reconnects up to a few `RekeyTimeout` later once the server is back.
+
+### After the server's answer [client-side, this fork, automatic; server: fallback]
+
+A server with a fallback (`install.sh --domain` on the panel) relays the client's QUIC Initial to a real HTTP/3 site and sends the site's answer back from the AWG port: the server answers the Initial as a website does. With the QUIC shape on, the client then goes on as a QUIC client would, instead of sending the AWG handshake right behind its Initial (a packet a QUIC client cannot send before the server's answer):
+
+| Step | On the wire |
+|------|-------------|
+| new connection attempt | the I-packets (QUIC Initial) and junk; the handshake initiation is held |
+| the site's Initial arrives from the server's address | after the rest of its flight (3 ms): an Initial that ACKs the server's Initials, to the connection ID the server chose, sealed with the keys of the first DCID (a middlebox that decrypts Initials reads a valid ACK), padded to 1250 bytes; then the handshake initiation as one QUIC v1 Handshake packet: the S1 prefix carries the long header (type Handshake, DCID = the server's connection ID, empty SCID as Chrome's, a Length covering the datagram) |
+| no answer within 1 s | the handshake initiation as before; the server is remembered as one without fallback and later attempts do not wait |
+| retry of an answered attempt | the handshake alone as a Handshake packet; the Initial is not sent again |
+| data | short header packets with the server's connection ID after the first byte, as 1-RTT packets carry it, when that ID is at most 4 bytes (quic-go and Caddy use 4) |
+
+The server side needs nothing new for this: it never reads the S1-S4 prefix. A server on this fork with a fallback also stops relaying the site's packets to a client for 10 s once that client has made an AWG handshake: the site retransmits its Handshake flight until its own handshake timeout (5 s in quic-go), a tail a real client stops with its ACKs.
+
+Costs and limits:
+
+- The first connection to a server pays one round trip more (the wait for the site), and 1 s once on a server without fallback.
+- A Handshake header needs `S1 >= 14` for a 4-byte server connection ID (more for longer ones); a shorter S1 keeps the short header shape.
+- The S1 prefix is also the header protection nonce. Shaped as a Handshake header its first 12 bytes are mostly fixed per connection, so only the few handshake initiations that start a connection get that shape, never rekeys or data. For data the connection ID is limited to 4 bytes, which leaves 62 random nonce bits.
+- The server's AWG handshake response still goes as a short header packet, as a server's 1-RTT packets do; what the site sent before it is a real TLS server flight that the client never finishes.
 
 ### Junk packets
 

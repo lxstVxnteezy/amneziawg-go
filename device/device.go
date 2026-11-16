@@ -52,6 +52,11 @@ type Device struct {
 	// flow (see flow.go).
 	bindGen atomic.Uint64
 
+	// flowAwaiting counts peers holding a handshake initiation until the
+	// server answers their QUIC Initial (answer.go): while it is zero the
+	// receive path skips looking at non-AWG datagrams for an answer.
+	flowAwaiting atomic.Int32
+
 	staticIdentity struct {
 		sync.RWMutex
 		privateKey NoisePrivateKey

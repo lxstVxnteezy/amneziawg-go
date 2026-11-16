@@ -145,36 +145,25 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 		sendBuffer = append(sendBuffer, peer.device.JunkPackets()...)
 	}
 
-	padding := int(peer.device.paddings.init.Load())
-	trailerLen := max(peer.randomTrailer(padding+MessageInitiationSize), 0)
-
-	buf := make([]byte, padding+MessageInitiationSize+trailerLen)
-
-	crypt := buf[:padding]
-	rand.Read(crypt)
-	if peer.device.quicShape.Load() {
-		shapeQUIC(crypt) // before the header cipher takes its nonce from crypt
-	}
-
-	writer := bytes.NewBuffer(buf[padding:padding])
-	binary.Write(writer, binary.LittleEndian, msg)
-	packet := writer.Bytes()
-	peer.cookieGenerator.AddMacs(packet)
-
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
 
-	cip, err := peer.device.HeaderProtectionCipher(crypt[:HeaderCipherNonceSize])
+	if plan.await != nil {
+		// the Initial goes now, the handshake once the server has
+		// answered it (answer.go)
+		err = peer.SendBuffers(sendBuffer)
+		if err != nil {
+			peer.device.log.Errorf("%v - Failed to send I-packets: %v", peer, err)
+		}
+		peer.timersHandshakeInitiated()
+		go peer.sendWhenAnswered(plan, msg)
+		return err
+	}
+
+	buf, err := peer.initiationDatagram(msg, plan.handshakeDCID)
 	if err != nil {
 		return err
 	}
-	if cip != nil {
-		cip.XORKeyStream(packet, packet)
-	}
-
-	trailer := buf[padding+MessageInitiationSize:]
-	rand.Read(trailer)
-
 	sendBuffer = append(sendBuffer, buf)
 	err = peer.SendBuffers(sendBuffer)
 	if err != nil {
@@ -183,6 +172,43 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	peer.timersHandshakeInitiated()
 
 	return err
+}
+
+// initiationDatagram puts a handshake initiation on the wire format: the
+// S1 prefix, MACs, header protection, the random trailer. With the QUIC
+// shape the prefix starts like a short header, or, given the server's
+// connection ID (handshakeDCID, a connection whose server answered the
+// Initial), like a QUIC Handshake packet.
+func (peer *Peer) initiationDatagram(msg *MessageInitiation, handshakeDCID []byte) ([]byte, error) {
+	padding := int(peer.device.paddings.init.Load())
+	trailerLen := max(peer.randomTrailer(padding+MessageInitiationSize), 0)
+
+	buf := make([]byte, padding+MessageInitiationSize+trailerLen)
+
+	crypt := buf[:padding]
+	rand.Read(crypt)
+	// before the header cipher takes its nonce from crypt
+	if peer.device.quicShape.Load() &&
+		(handshakeDCID == nil || !shapeQUICHandshake(crypt, handshakeDCID, len(buf))) {
+		shapeQUIC(crypt)
+	}
+
+	writer := bytes.NewBuffer(buf[padding:padding])
+	binary.Write(writer, binary.LittleEndian, msg)
+	packet := writer.Bytes()
+	peer.cookieGenerator.AddMacs(packet)
+
+	cip, err := peer.device.HeaderProtectionCipher(crypt[:HeaderCipherNonceSize])
+	if err != nil {
+		return nil, err
+	}
+	if cip != nil {
+		cip.XORKeyStream(packet, packet)
+	}
+
+	trailer := buf[padding+MessageInitiationSize:]
+	rand.Read(trailer)
+	return buf, nil
 }
 
 func (peer *Peer) SendHandshakeResponse() error {
@@ -519,6 +545,18 @@ func (peer *Peer) FlushStagedPackets() {
 	}
 }
 
+// With the QUIC shape, inner packets up to smallPacketMax bytes (a TCP ACK
+// with timestamps and SACK, a keepalive) get only 0..smallPacketJitter-1
+// bytes of padding instead of the content padding: a QUIC client's ACKs are
+// 30-45 bytes, and the tunnel's were ~150 with padding against ~106 without
+// (32 bytes of header and tag plus S4 are the floor). The jitter keeps the
+// size from being constant. Only the sender changes: the receiver takes the
+// length from the inner IP header and never checks the padding.
+const (
+	smallPacketMax    = 80
+	smallPacketJitter = 8
+)
+
 func calculatePaddingSize(packetSize, mtu int) int {
 	lastUnit := packetSize
 	if mtu == 0 {
@@ -630,7 +668,11 @@ func (device *Device) RoutineEncryption(id int) {
 			crypt := elem.buffer[:elem.padding]
 			prng.Read(crypt)
 			if device.quicShape.Load() {
-				shapeQUIC(crypt) // before the header cipher takes its nonce from crypt
+				// before the header cipher takes its nonce from crypt
+				shapeQUIC(crypt)
+				if dcid := elem.peer.quicDCID.Load(); dcid != nil && len(crypt) > len(*dcid) {
+					copy(crypt[1:], *dcid) // a 1-RTT packet to the server's connection ID
+				}
 			}
 
 			// populate header fields
@@ -647,7 +689,16 @@ func (device *Device) RoutineEncryption(id int) {
 			packetSize := len(elem.packet) + MinMessageSize + int(elem.padding)
 			mtu := int(device.tun.mtu.Load())
 
-			paddingSize := elem.peer.randomPaddingAddition(packetSize)
+			paddingSize := -1
+			if device.quicShape.Load() && len(elem.packet) <= smallPacketMax {
+				// acknowledgements and keepalives: a QUIC client's ACKs are
+				// 30-45 bytes, so padding them only adds distance (see
+				// smallPacketMax)
+				paddingSize = int(fastrandn(smallPacketJitter))
+			}
+			if paddingSize < 0 {
+				paddingSize = elem.peer.randomPaddingAddition(packetSize)
+			}
 			if paddingSize < 0 {
 				paddingSize = elem.peer.randomTrailer(packetSize)
 			}

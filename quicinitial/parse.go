@@ -22,6 +22,13 @@ var errShort = errors.New("truncated")
 // Open undoes header protection and decryption of a client Initial the way
 // a middlebox would.
 func Open(p []byte) (dcid []byte, pn uint32, frames []byte, err error) {
+	return OpenWithKeys(p, nil)
+}
+
+// OpenWithKeys is Open for a later Initial of a connection, whose keys come
+// from the DCID of the client's first Initial (keyDCID) and not from the
+// connection ID in the packet. A nil keyDCID takes the packet's DCID.
+func OpenWithKeys(p, keyDCID []byte) (dcid []byte, pn uint32, frames []byte, err error) {
 	if len(p) < 7 || p[0]&0xf0 != 0xc0 || binary.BigEndian.Uint32(p[1:5]) != 1 {
 		return nil, 0, nil, errors.New("not a QUIC v1 Initial")
 	}
@@ -56,7 +63,10 @@ func Open(p []byte) (dcid []byte, pn uint32, frames []byte, err error) {
 		return nil, 0, nil, fmt.Errorf("length field %d does not match the datagram", length)
 	}
 
-	k := clientInitialKeys(dcid)
+	if keyDCID == nil {
+		keyDCID = dcid
+	}
+	k := clientInitialKeys(keyDCID)
 	hp, _ := aes.NewCipher(k.hp)
 	var mask [16]byte
 	hp.Encrypt(mask[:], p[off+4:off+20])
