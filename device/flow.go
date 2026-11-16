@@ -146,8 +146,10 @@ func (peer *Peer) planHandshake() handshakePlan {
 		if f.sends < maxFlightSends {
 			// a rekey on a live flow: the handshake alone
 			f.sends++
+			device.log.Verbosef("%v - QUIC flow: rekey on the live flow (send %d), no I-packets", peer, f.sends)
 			return handshakePlan{backoff: uint(f.sends - 1)}
 		}
+		device.log.Verbosef("%v - QUIC flow: %d rekeys unanswered, the flow is lost: new connection attempt", peer, f.sends)
 		// rekeys go unanswered: the flow is lost, start over
 		f.established = false
 		f.sends = 0
@@ -155,6 +157,7 @@ func (peer *Peer) planHandshake() handshakePlan {
 
 	if f.sends > 0 && f.sends < maxFlightSends && f.attemptCurrent(device) {
 		f.sends++
+		device.log.Verbosef("%v - QUIC flow: retransmitting attempt %d (send %d, answered %v)", peer, f.gen, f.sends, f.answered)
 		if f.answered {
 			// the server answered the Initial: a QUIC client does not send
 			// it again, it goes on with the handshake alone
@@ -180,6 +183,8 @@ func (peer *Peer) planHandshake() handshakePlan {
 	f.sends = 1
 	plan := handshakePlan{ipackets: peer.freshIPackets(&f.attempt), junk: true}
 	plan.await, plan.gen = f.newAttempt(device, len(plan.ipackets) > 0)
+	device.log.Verbosef("%v - QUIC flow: new connection attempt %d on %s (%d I-packet datagrams, waiting for the site's answer %v, server known without fallback %v)",
+		peer, plan.gen, key.dst, len(plan.ipackets), plan.await != nil, f.noAnswer)
 	peer.quicDCID.Store(nil) // a new connection; its server picks a new ID
 	return plan
 }
@@ -252,6 +257,9 @@ func (peer *Peer) flowHandshakeComplete() {
 	if n := len(f.serverCID); n > 0 && n <= maxDataCID {
 		cid := append([]byte(nil), f.serverCID...)
 		peer.quicDCID.Store(&cid)
+		peer.device.log.Verbosef("%v - QUIC flow: handshake complete, data carries the server's connection ID %x", peer, cid)
+	} else if n > maxDataCID {
+		peer.device.log.Verbosef("%v - QUIC flow: handshake complete; the server's connection ID is %d bytes, longer than %d: data without it", peer, n, maxDataCID)
 	}
 	f.Unlock()
 }
