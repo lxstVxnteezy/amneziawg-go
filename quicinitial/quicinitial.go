@@ -423,7 +423,7 @@ func (a *Attempt) Flight() ([][]byte, error) {
 // middlebox that decrypts Initials reads a valid ACK. Its packet number
 // follows the attempt's Initials.
 func (a *Attempt) Ack(serverCID []byte, largest uint64) ([]byte, error) {
-	frames := []byte{0x02}                                  // ACK
+	frames := []byte{0x02}                                 // ACK
 	frames = appendVarint(frames, largest)                 // largest acknowledged
 	frames = appendVarint(frames, uint64(randInt(0, 400))) // ACK delay
 	frames = appendVarint(frames, 0)                       // no further ranges
