@@ -519,6 +519,18 @@ func (peer *Peer) FlushStagedPackets() {
 	}
 }
 
+// With the QUIC shape, inner packets up to smallPacketMax bytes (a TCP ACK
+// with timestamps and SACK, a keepalive) get only 0..smallPacketJitter-1
+// bytes of padding instead of the content padding: a QUIC client's ACKs are
+// 30-45 bytes, and the tunnel's were ~150 with padding against ~106 without
+// (32 bytes of header and tag plus S4 are the floor). The jitter keeps the
+// size from being constant. Only the sender changes: the receiver takes the
+// length from the inner IP header and never checks the padding.
+const (
+	smallPacketMax    = 80
+	smallPacketJitter = 8
+)
+
 func calculatePaddingSize(packetSize, mtu int) int {
 	lastUnit := packetSize
 	if mtu == 0 {
@@ -647,7 +659,16 @@ func (device *Device) RoutineEncryption(id int) {
 			packetSize := len(elem.packet) + MinMessageSize + int(elem.padding)
 			mtu := int(device.tun.mtu.Load())
 
-			paddingSize := elem.peer.randomPaddingAddition(packetSize)
+			paddingSize := -1
+			if device.quicShape.Load() && len(elem.packet) <= smallPacketMax {
+				// acknowledgements and keepalives: a QUIC client's ACKs are
+				// 30-45 bytes, so padding them only adds distance (see
+				// smallPacketMax)
+				paddingSize = int(fastrandn(smallPacketJitter))
+			}
+			if paddingSize < 0 {
+				paddingSize = elem.peer.randomPaddingAddition(packetSize)
+			}
 			if paddingSize < 0 {
 				paddingSize = elem.peer.randomTrailer(packetSize)
 			}

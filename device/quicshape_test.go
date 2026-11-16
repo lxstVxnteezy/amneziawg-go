@@ -266,3 +266,28 @@ func TestShapeQUICAndIsQUICInitial(t *testing.T) {
 		}
 	}
 }
+
+// With the QUIC shape, small inner packets (ACKs, keepalives) skip the
+// content padding: a QUIC client's ACKs are 30-45 bytes. A device without
+// the shape pads them as before. The tunnel keeps working both ways.
+func TestQUICShapeSmallPacketsUnpadded(t *testing.T) {
+	pad := []string{"content_padding_addition", "40-60"}
+	pair, rec := wirePair(t, [2][]string{append([]string{"i1", "<quic sni=vpn.example.com>"}, pad...), pad})
+	traffic(t, pair)
+	// a 32-byte ICMP echo + 32 bytes of header and tag + S4 (16)
+	const lo, hi = 32 + MinMessageSize + 16, 32 + MinMessageSize + 16 + smallPacketJitter
+	count := func(sent [][]byte) (small int) {
+		for _, d := range sent {
+			if len(d) >= lo && len(d) < hi {
+				small++
+			}
+		}
+		return small
+	}
+	if n := count(rec[0].take()); n < 40 {
+		t.Fatalf("shaped client sent %d datagrams of %d-%d bytes, want its ~100 pings unpadded", n, lo, hi-1)
+	}
+	if n := count(rec[1].take()); n != 0 {
+		t.Fatalf("server without the shape sent %d unpadded datagrams", n)
+	}
+}
